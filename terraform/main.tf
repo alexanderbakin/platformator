@@ -23,8 +23,9 @@ resource "aws_security_group" "main" {
 
 # https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule
 resource "aws_vpc_security_group_ingress_rule" "allow_ssh" {
+  for_each          = toset(nonsensitive(var.developer_cidrs))
   security_group_id = aws_security_group.main.id
-  cidr_ipv4         = var.developer_cidr
+  cidr_ipv4         = each.value
   ip_protocol       = "tcp"
   from_port         = 22
   to_port           = 22
@@ -47,8 +48,9 @@ resource "aws_vpc_security_group_ingress_rule" "allow_https" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "allow_kubernetes_api" {
+  for_each          = toset(nonsensitive(var.developer_cidrs))
   security_group_id = aws_security_group.main.id
-  cidr_ipv4         = var.developer_cidr
+  cidr_ipv4         = each.value
   ip_protocol       = "tcp"
   from_port         = 6443
   to_port           = 6443

@@ -21,9 +21,9 @@ variable "subnet_cidr" {
   default     = "10.0.0.0/24"
 }
 
-variable "developer_cidr" {
-  type        = string
-  description = "CIDR range allowed to access the instance via SSH and Kubernetes API"
+variable "developer_cidrs" {
+  type        = list(string)
+  description = "CIDR ranges allowed to access the instance via SSH and Kubernetes API"
   sensitive   = true
 }
 
