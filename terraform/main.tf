@@ -99,3 +99,20 @@ resource "aws_eip" "main" {
   instance = aws_instance.main.id
   domain   = "vpc"
 }
+
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route53_record
+resource "aws_route53_record" "apex" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = var.domain
+  type    = "A"
+  ttl     = 60
+  records = [aws_eip.main.public_ip]
+}
+
+resource "aws_route53_record" "wildcard" {
+  zone_id = data.aws_route53_zone.main.zone_id
+  name    = "*.${var.domain}"
+  type    = "A"
+  ttl     = 60
+  records = [aws_eip.main.public_ip]
+}

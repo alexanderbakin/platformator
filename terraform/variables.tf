@@ -32,3 +32,13 @@ variable "developer_key" {
   description = "SSH public key to access the instance via SSH"
   sensitive   = true
 }
+
+variable "hosted_zone_name" {
+  type        = string
+  description = "Root domain's Route53 hosted zone name (must end in a dot)"
+}
+
+variable "domain" {
+  type        = string
+  description = "Base domain the platform is served on (e.g. paas.alexanderbakin.com)"
+}

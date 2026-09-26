@@ -1,0 +1,53 @@
+- name: Configure a Kubernetes node
+  hosts: all
+  become: true
+  tasks:
+    - name: Ensure k3s config directory exists
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+
+    - name: Install k3s config
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: /etc/rancher/k3s/config.yaml
+      notify: Restart and enable k3s
+
+    - name: Download k3s
+      ansible.builtin.get_url:
+        url: https://get.k3s.io
+        dest: /tmp/k3s
+        mode: "0744"
+
+    - name: Install k3s
+      ansible.builtin.command: /tmp/k3s
+      args:
+        creates: /usr/local/bin/k3s
+      notify: Restart and enable k3s
+
+    - name: Start and enable k3s (self-healing in case handler's not triggered)
+      ansible.builtin.systemd_service:
+        name: k3s
+        state: started
+        enabled: true
+
+    - name: Fetch kubeconfig
+      ansible.builtin.fetch:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ playbook_dir }}/kubeconfig"
+        flat: true
+
+    - name: Point kubeconfig at the public IP instead of localhost
+      ansible.builtin.replace:
+        path: "{{ playbook_dir }}/kubeconfig"
+        regexp: '127\.0\.0\.1'
+        replace: "{{ ansible_host }}"
+      delegate_to: localhost
+      become: false
+
+  handlers:
+    - name: Restart and enable k3s
+      ansible.builtin.systemd_service:
+        name: k3s
+        state: restarted
+        enabled: true

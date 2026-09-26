@@ -1,0 +1,10 @@
+plugin: amazon.aws.aws_ec2
+regions:
+  - "{{ lookup('env', 'AWS_DEFAULT_REGION') | mandatory }}"
+filters:
+  tag:ManagedBy: Terraform
+  tag:Project: platformator
+hostvars_prefix: "aws_"
+compose:
+  ansible_host: aws_public_ip_address
+strict: true
