@@ -1,6 +1,9 @@
 - name: Configure a Kubernetes node
   hosts: all
   become: true
+  vars:
+    k3s_version: latest
+    cert_manager_version: latest
   tasks:
     - name: Ensure k3s config directory exists
       ansible.builtin.file:
@@ -19,8 +22,25 @@
         dest: /tmp/k3s
         mode: "0744"
 
+    - name: Ensure k3s manifests directory exists
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s/server/manifests
+        state: directory
+
+    - name: Download a cert-manager manifest
+      ansible.builtin.get_url:
+        url: "https://github.com/cert-manager/cert-manager/releases/{{ 'latest/download' if cert_manager_version == 'latest' else 'download/' + cert_manager_version }}/cert-manager.yaml"
+        dest: /var/lib/rancher/k3s/server/manifests/01-cert-manager.yaml
+
+    - name: Deploy a ClusterIssuer manifest
+      ansible.builtin.template:
+        src: cluster-issuer.yaml.j2
+        dest: /var/lib/rancher/k3s/server/manifests/02-cluster-issuer.yaml
+
     - name: Install k3s
       ansible.builtin.command: /tmp/k3s
+      environment:
+        INSTALL_K3S_VERSION: "{{ '' if k3s_version == 'latest' else k3s_version }}"
       args:
         creates: /usr/local/bin/k3s
       notify: Restart and enable k3s
