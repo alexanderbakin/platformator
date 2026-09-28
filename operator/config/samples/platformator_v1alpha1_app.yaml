@@ -1,0 +1,12 @@
+apiVersion: platformator.alexanderbakin.com/v1alpha1
+kind: App
+metadata:
+  labels:
+    app.kubernetes.io/name: operator
+    app.kubernetes.io/managed-by: kustomize
+  name: hello
+spec:
+  image: traefik/whoami:latest
+  port: 80
+  minReplicas: 1
+  maxReplicas: 1

@@ -4,9 +4,9 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 3 of 30.
+Day 4 of 30.
 
-Single-node k3s cluster running on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager.
+Single-node k3s cluster running on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are now deployed through an `App` CRD and controller, which create the Deployment/Service/Ingress for you instead of applying them by hand.
 
 ## Architecture
 
@@ -145,18 +145,35 @@ export KUBECONFIG=./ansible/kubeconfig
 kubectl get nodes
 ```
 
-### Deploy the example app
+### Deploy an app via the App CRD
 
-`examples/hello/` is a minimal Deployment/Service/Ingress used to prove the ingress and TLS path work - not part of the platform itself, and not applied automatically by Ansible. Its Ingress templates in `$DOMAIN` via `envsubst`:
+Day 4 replaces manually applying a Deployment/Service/Ingress with an `App` CRD and controller that create them for you, wired up the same way as before: Traefik ingress, TLS via the `letsencrypt` `ClusterIssuer`.
+
+Install the CRD into the cluster:
 
 ```bash
-envsubst < examples/hello/ingress.yaml | kubectl apply -f examples/hello/deployment.yaml -f examples/hello/service.yaml -f -
+cd operator
+make install
+```
+
+Run the controller locally against the cluster (not yet deployed in-cluster itself - that's a later day):
+
+```bash
+make run
+```
+
+In another terminal, apply a sample App:
+
+```bash
+kubectl apply -f config/samples/platformator_v1alpha1_app.yaml
 kubectl get certificate hello-tls -w   # wait for READY=True
 curl "https://hello.$DOMAIN/"
 ```
 
-No `-k`, no warnings - a real Let's Encrypt cert. `kubectl describe certificate hello-tls` shows the renewal window (cert-manager renews automatically well before the 90-day expiry).
+No `-k`, no warnings - a real Let's Encrypt cert, same as before, now provisioned by the operator instead of by hand.
 
 ## Posts
 
-WIP.
+1. [Day 1](https://lnkd.in/p/dk4nhxCg)
+2. [Day 2](https://lnkd.in/p/dJvCgHPF)
+3. [Day 3](https://lnkd.in/p/d59V8WEu)

@@ -1,0 +1,185 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
+)
+
+// AppReconciler reconciles a App object
+type AppReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+	Domain string
+}
+
+// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+
+// Reconcile is part of the main kubernetes reconciliation loop which aims to
+// move the current state of the cluster closer to the desired state.
+func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+
+	log := logf.FromContext(ctx)
+	log.Info("reconciling App", "name", req.Name)
+
+	var app platformatorv1alpha1.App
+	if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
+		if apierrors.IsNotFound(err) {
+			// App was deleted - owner references handle cleanup of the
+			// Deployment/Service/Ingress, nothing left for us to do.
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileDeployment(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
+	}
+
+	if err := r.reconcileService(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
+	}
+
+	if err := r.reconcileIngress(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
+	}
+
+	log.Info("reconciled App")
+	return ctrl.Result{}, nil
+}
+
+func labelsFor(app *platformatorv1alpha1.App) map[string]string {
+	return map[string]string{"app": app.Name}
+}
+
+func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformatorv1alpha1.App) error {
+
+	replicas := int32(1)
+	if app.Spec.MinReplicas != nil {
+		replicas = *app.Spec.MinReplicas
+	}
+
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+		dep.Spec.Replicas = &replicas
+		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labelsFor(app)}
+		dep.Spec.Template = corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  app.Name,
+					Image: app.Spec.Image,
+					Ports: []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
+				}},
+			},
+		}
+		return controllerutil.SetControllerReference(app, dep, r.Scheme)
+	})
+	return err
+}
+
+func (r *AppReconciler) reconcileService(ctx context.Context, app *platformatorv1alpha1.App) error {
+
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Spec.Selector = labelsFor(app)
+		svc.Spec.Ports = []corev1.ServicePort{{
+			Port:       app.Spec.Port,
+			TargetPort: intstr.FromInt32(app.Spec.Port),
+		}}
+		return controllerutil.SetControllerReference(app, svc, r.Scheme)
+	})
+	return err
+}
+
+func (r *AppReconciler) reconcileIngress(ctx context.Context, app *platformatorv1alpha1.App) error {
+
+	clusterIssuerName := "letsencrypt"
+	ingressClassName := "traefik"
+	host := fmt.Sprintf("%s.%s", app.Name, r.Domain)
+	pathType := networkingv1.PathTypePrefix
+
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
+		if ing.Annotations == nil {
+			ing.Annotations = map[string]string{}
+		}
+		ing.Annotations["cert-manager.io/cluster-issuer"] = clusterIssuerName
+
+		ing.Spec.IngressClassName = &ingressClassName
+		ing.Spec.Rules = []networkingv1.IngressRule{{
+			Host: host,
+			IngressRuleValue: networkingv1.IngressRuleValue{
+				HTTP: &networkingv1.HTTPIngressRuleValue{
+					Paths: []networkingv1.HTTPIngressPath{{
+						Path:     "/",
+						PathType: &pathType,
+						Backend: networkingv1.IngressBackend{
+							Service: &networkingv1.IngressServiceBackend{
+								Name: app.Name,
+								Port: networkingv1.ServiceBackendPort{Number: app.Spec.Port},
+							},
+						},
+					}},
+				},
+			},
+		}}
+		ing.Spec.TLS = []networkingv1.IngressTLS{{
+			Hosts:      []string{host},
+			SecretName: app.Name + "-tls",
+		}}
+		return controllerutil.SetControllerReference(app, ing, r.Scheme)
+	})
+	return err
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&platformatorv1alpha1.App{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
+		Owns(&networkingv1.Ingress{}).
+		Named("app").
+		Complete(r)
+}
