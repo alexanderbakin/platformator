@@ -57,6 +57,12 @@ spec:
                 maximum: 65535
                 minimum: 1
                 type: integer
+              targetCPUUtilizationPercentage:
+                default: 50
+                format: int32
+                maximum: 100
+                minimum: 0
+                type: integer
             required:
             - image
             - port

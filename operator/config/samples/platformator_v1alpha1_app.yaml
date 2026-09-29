@@ -9,4 +9,4 @@ spec:
   image: traefik/whoami:latest
   port: 80
   minReplicas: 1
-  maxReplicas: 1
+  maxReplicas: 5

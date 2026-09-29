@@ -41,6 +41,12 @@ type AppSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +kubebuilder:default=50
+	TargetCPUUtilizationPercentage *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
 }
 
 // AppStatus defines the observed state of App.

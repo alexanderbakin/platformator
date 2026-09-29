@@ -21,9 +21,11 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -48,6 +50,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -78,6 +81,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
 	}
 
+	if err := r.reconcileHPA(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling HPA: %w", err)
+	}
+
 	log.Info("reconciled App")
 	return ctrl.Result{}, nil
 }
@@ -97,7 +104,9 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 	}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
-		dep.Spec.Replicas = &replicas
+		if dep.CreationTimestamp.IsZero() {
+			dep.Spec.Replicas = &replicas
+		}
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labelsFor(app)}
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
@@ -106,6 +115,11 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 					Name:  app.Name,
 					Image: app.Spec.Image,
 					Ports: []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
+					},
 				}},
 			},
 		}
@@ -173,6 +187,39 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *platformatorv
 	return err
 }
 
+func (r *AppReconciler) reconcileHPA(ctx context.Context, app *platformatorv1alpha1.App) error {
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, hpa, func() error {
+
+		hpa.Spec = autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				Kind:       "Deployment",
+				Name:       app.Name,
+				APIVersion: "apps/v1",
+			},
+			MinReplicas: app.Spec.MinReplicas,
+			MaxReplicas: *app.Spec.MaxReplicas,
+			Metrics: []autoscalingv2.MetricSpec{
+				autoscalingv2.MetricSpec{
+					Type: autoscalingv2.ResourceMetricSourceType,
+					Resource: &autoscalingv2.ResourceMetricSource{
+						Name: corev1.ResourceCPU,
+						Target: autoscalingv2.MetricTarget{
+							Type:               autoscalingv2.UtilizationMetricType,
+							AverageUtilization: app.Spec.TargetCPUUtilizationPercentage,
+						},
+					},
+				},
+			},
+		}
+		return controllerutil.SetControllerReference(app, hpa, r.Scheme)
+	})
+	return err
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -180,6 +227,7 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&networkingv1.Ingress{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Named("app").
 		Complete(r)
 }

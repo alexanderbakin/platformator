@@ -4,9 +4,9 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 4 of 30.
+Day 5 of 30.
 
-Single-node k3s cluster running on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are now deployed through an `App` CRD and controller, which create the Deployment/Service/Ingress for you instead of applying them by hand.
+Single-node k3s cluster running on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are now deployed through an `App` CRD and controller, which create the Deployment/Service/Ingress for you instead of applying them by hand. Apps now autoscale on real CPU usage too - each App's `minReplicas`/`maxReplicas`/`targetCPUUtilizationPercentage` translate into a `HorizontalPodAutoscaler` the controller manages alongside the Deployment/Service/Ingress.
 
 ## Architecture
 
@@ -177,3 +177,4 @@ No `-k`, no warnings - a real Let's Encrypt cert, same as before, now provisione
 1. [Day 1](https://lnkd.in/p/dk4nhxCg)
 2. [Day 2](https://lnkd.in/p/dJvCgHPF)
 3. [Day 3](https://lnkd.in/p/d59V8WEu)
+4. [Day 4](https://lnkd.in/p/ds2Crscn)
