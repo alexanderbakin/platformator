@@ -28,3 +28,6 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# File containing the DOMAIN environment variable
+config/default/domain.env

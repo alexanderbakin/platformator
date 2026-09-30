@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -87,8 +88,18 @@ var _ = Describe("App Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			By("Verifying the App reports a Ready condition")
+			// Reconcile wrote to its own local copy of the App, not the
+			// "app" variable from BeforeEach - re-fetch to see what actually
+			// landed in the API server (and its status subresource).
+			updated := &platformatorv1alpha1.App{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+
+			readyCondition := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(readyCondition).NotTo(BeNil())
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(readyCondition.Reason).To(Equal("ReconcileSucceeded"))
 		})
 	})
 })

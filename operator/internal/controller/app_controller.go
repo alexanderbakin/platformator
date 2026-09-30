@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,19 +49,24 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=,resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+//
+// The named return values (result, err) let the deferred status-update
+// closure below see whatever error (if any) this function is about to
+// return, without every early "return ..." having to remember to also
+// update the App's status itself.
+func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 
 	log := logf.FromContext(ctx)
 	log.Info("reconciling App", "name", req.Name)
 
 	var app platformatorv1alpha1.App
-	if err := r.Get(ctx, req.NamespacedName, &app); err != nil {
+	if err = r.Get(ctx, req.NamespacedName, &app); err != nil {
 		if apierrors.IsNotFound(err) {
 			// App was deleted - owner references handle cleanup of the
 			// Deployment/Service/Ingress, nothing left for us to do.
@@ -69,19 +75,47 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileDeployment(ctx, &app); err != nil {
+	// This runs right before Reconcile actually returns, whichever of the
+	// return statements below fires. It looks at the final value of the
+	// named "err" result to decide whether the App was healthy this pass,
+	// records that as a "Ready" status condition, and persists it via the
+	// status subresource (a separate write from updating app.Spec).
+	defer func() {
+		readyStatus := metav1.ConditionTrue
+		reason := "ReconcileSucceeded"
+		message := "Deployment, Service, Ingress and HorizontalPodAutoscaler are up to date"
+		if err != nil {
+			readyStatus = metav1.ConditionFalse
+			reason = "ReconcileError"
+			message = err.Error()
+		}
+
+		meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             readyStatus,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: app.Generation,
+		})
+
+		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
+			log.Error(statusErr, "failed to update App status")
+		}
+	}()
+
+	if err = r.reconcileDeployment(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
 	}
 
-	if err := r.reconcileService(ctx, &app); err != nil {
+	if err = r.reconcileService(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
 	}
 
-	if err := r.reconcileIngress(ctx, &app); err != nil {
+	if err = r.reconcileIngress(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
 	}
 
-	if err := r.reconcileHPA(ctx, &app); err != nil {
+	if err = r.reconcileHPA(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling HPA: %w", err)
 	}
 

@@ -39,6 +39,9 @@ patches:
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
+- path: manager_domain_patch.yaml
+  target:
+    kind: Deployment
 
 # Uncomment the patches line if you enable Metrics and CertManager
 # [METRICS-WITH-CERTS] To enable metrics protected with certManager, uncomment the following line.
@@ -231,3 +234,8 @@ patches:
 #     fieldPath: .metadata.name
 #   targets: # Do not remove or uncomment the following scaffold marker; required to generate code for target CRD.
 # +kubebuilder:scaffold:crdkustomizecainjectionname
+
+configMapGenerator:
+- name: operator-domain-config
+  envs:
+  - domain.env
