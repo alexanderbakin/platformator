@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -47,6 +48,13 @@ type AppSpec struct {
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=50
 	TargetCPUUtilizationPercentage *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+
+	// +optional
+	Env []corev1.EnvVar `json:"env"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="('cpu' in self.limits && 'cpu' in self.requests && 'memory' in self.limits && 'memory' in self.requests) && !quantity(self.limits['cpu']).isLessThan(quantity(self.requests['cpu'])) && !quantity(self.limits['memory']).isLessThan(quantity(self.requests['memory']))",message="CPU and memory limits/requests must be set and limits must be greater than or equal to requests"
+	Resources corev1.ResourceRequirements `json:"resources"`
 }
 
 // AppStatus defines the observed state of App.

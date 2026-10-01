@@ -23,10 +23,12 @@ import (
 	. "github.com/onsi/gomega"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
@@ -59,8 +61,21 @@ var _ = Describe("App Controller", func() {
 					Spec: platformatorv1alpha1.AppSpec{
 						Image:       "nginx:latest",
 						Port:        80,
-						MinReplicas: ptr.To(int32(1)),
-						MaxReplicas: ptr.To(int32(1)),
+						MinReplicas: new(int32(1)),
+						MaxReplicas: new(int32(1)),
+						Env: []corev1.EnvVar{
+							{Name: "KEY", Value: "value"},
+						},
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("50m"),
+								corev1.ResourceMemory: resource.MustParse("50M"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("100m"),
+								corev1.ResourceMemory: resource.MustParse("100M"),
+							},
+						},
 					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
@@ -100,6 +115,16 @@ var _ = Describe("App Controller", func() {
 			Expect(readyCondition).NotTo(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCondition.Reason).To(Equal("ReconcileSucceeded"))
+
+			By("Verifying the Deployment's container got the App's Env and Resources")
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, dep)).To(Succeed())
+
+			Expect(dep.Spec.Template.Spec.Containers).To(HaveLen(1))
+			container := dep.Spec.Template.Spec.Containers[0]
+
+			Expect(container.Env).To(Equal(updated.Spec.Env))
+			Expect(container.Resources).To(Equal(updated.Spec.Resources))
 		})
 	})
 })

@@ -26,7 +26,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -146,14 +145,11 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 			ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
-					Name:  app.Name,
-					Image: app.Spec.Image,
-					Ports: []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("100m"),
-						},
-					},
+					Name:      app.Name,
+					Image:     app.Spec.Image,
+					Ports:     []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
+					Resources: app.Spec.Resources,
+					Env:       app.Spec.Env,
 				}},
 			},
 		}

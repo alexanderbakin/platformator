@@ -10,3 +10,13 @@ spec:
   port: 80
   minReplicas: 1
   maxReplicas: 5
+  env:
+    - name: KEY
+      value: value
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "50M"
+    limits:
+      cpu: "100m"
+      memory: "100M"
