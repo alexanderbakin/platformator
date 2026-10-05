@@ -233,7 +233,7 @@ func (r *AppReconciler) reconcileHPA(ctx context.Context, app *platformatorv1alp
 			MinReplicas: app.Spec.MinReplicas,
 			MaxReplicas: *app.Spec.MaxReplicas,
 			Metrics: []autoscalingv2.MetricSpec{
-				autoscalingv2.MetricSpec{
+				{
 					Type: autoscalingv2.ResourceMetricSourceType,
 					Resource: &autoscalingv2.ResourceMetricSource{
 						Name: corev1.ResourceCPU,

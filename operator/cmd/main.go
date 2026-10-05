@@ -64,7 +64,8 @@ func main() {
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	var domain string
-	flag.StringVar(&domain, "domain", os.Getenv("DOMAIN"), "Base domain apps are served on, e.g. paas.example.com. Falls back to the DOMAIN env var.")
+	flag.StringVar(&domain, "domain", os.Getenv("DOMAIN"), "Base domain apps are served on, e.g. paas.example.com. "+
+		"Falls back to the DOMAIN env var.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
