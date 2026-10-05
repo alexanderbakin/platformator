@@ -104,20 +104,48 @@ var _ = Describe("App Controller", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Verifying the App reports a Ready condition")
+			By("Verifying the App reports Reconciled and Ready conditions")
 			// Reconcile wrote to its own local copy of the App, not the
 			// "app" variable from BeforeEach - re-fetch to see what actually
 			// landed in the API server (and its status subresource).
 			updated := &platformatorv1alpha1.App{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
 
+			reconciledCondition := meta.FindStatusCondition(updated.Status.Conditions, "Reconciled")
+			Expect(reconciledCondition).NotTo(BeNil())
+			Expect(reconciledCondition.Status).To(Equal(metav1.ConditionTrue))
+			Expect(reconciledCondition.Reason).To(Equal("ReconcileSucceeded"))
+
+			// envtest has no Deployment controller, so the Deployment never
+			// reports Available on its own: Ready must be False for now.
 			readyCondition := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
 			Expect(readyCondition).NotTo(BeNil())
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCondition.Reason).To(Equal("DeploymentUnavailable"))
+
+			By("Faking the Deployment becoming Available and reconciling again")
+			dep := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, dep)).To(Succeed())
+			dep.Status.Conditions = []appsv1.DeploymentCondition{{
+				Type:    appsv1.DeploymentAvailable,
+				Status:  corev1.ConditionTrue,
+				Reason:  "MinimumReplicasAvailable",
+				Message: "Deployment has minimum availability.",
+			}}
+			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			readyCondition = meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(readyCondition).NotTo(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
-			Expect(readyCondition.Reason).To(Equal("ReconcileSucceeded"))
+			Expect(readyCondition.Reason).To(Equal("DeploymentAvailable"))
 
 			By("Verifying the Deployment's container got the App's Env and Resources")
-			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, dep)).To(Succeed())
 
 			Expect(dep.Spec.Template.Spec.Containers).To(HaveLen(1))

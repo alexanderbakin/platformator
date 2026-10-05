@@ -74,35 +74,59 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		return ctrl.Result{}, err
 	}
 
+	// dep is filled in by reconcileDeployment and read by the deferred
+	// closure below to decide whether the App is actually Ready.
+	var dep *appsv1.Deployment
+
 	// This runs right before Reconcile actually returns, whichever of the
-	// return statements below fires. It looks at the final value of the
-	// named "err" result to decide whether the App was healthy this pass,
-	// records that as a "Ready" status condition, and persists it via the
-	// status subresource (a separate write from updating app.Spec).
+	// return statements below fires. It records two status conditions and
+	// persists them via the status subresource:
+	//   - Reconciled: did every API call in this pass succeed?
+	//   - Ready: is the Deployment actually Available (pods serving)?
 	defer func() {
-		readyStatus := metav1.ConditionTrue
-		reason := "ReconcileSucceeded"
-		message := "Deployment, Service, Ingress and HorizontalPodAutoscaler are up to date"
-		if err != nil {
-			readyStatus = metav1.ConditionFalse
-			reason = "ReconcileError"
-			message = err.Error()
+		reconciled := metav1.Condition{
+			Type:               "Reconciled",
+			Status:             metav1.ConditionTrue,
+			Reason:             "ReconcileSucceeded",
+			Message:            "Deployment, Service, Ingress and HorizontalPodAutoscaler are up to date",
+			ObservedGeneration: app.Generation,
+		}
+		ready := metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionTrue,
+			Reason:             "DeploymentAvailable",
+			Message:            "Deployment has minimum availability",
+			ObservedGeneration: app.Generation,
 		}
 
-		meta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             readyStatus,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: app.Generation,
-		})
+		avail := availableCondition(dep)
+		switch {
+		case err != nil:
+			reconciled.Status = metav1.ConditionFalse
+			reconciled.Reason = "ReconcileError"
+			reconciled.Message = err.Error()
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = "ReconcileError"
+			ready.Message = "Reconcile failed, see the Reconciled condition"
+		case avail == nil:
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = "DeploymentUnavailable"
+			ready.Message = "Deployment has not reported an Available condition yet"
+		case avail.Status != corev1.ConditionTrue:
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = "DeploymentUnavailable"
+			ready.Message = avail.Message
+		}
+
+		meta.SetStatusCondition(&app.Status.Conditions, reconciled)
+		meta.SetStatusCondition(&app.Status.Conditions, ready)
 
 		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
 			log.Error(statusErr, "failed to update App status")
 		}
 	}()
 
-	if err = r.reconcileDeployment(ctx, &app); err != nil {
+	if dep, err = r.reconcileDeployment(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
 	}
 
@@ -126,7 +150,7 @@ func labelsFor(app *platformatorv1alpha1.App) map[string]string {
 	return map[string]string{"app": app.Name}
 }
 
-func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformatorv1alpha1.App) error {
+func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformatorv1alpha1.App) (*appsv1.Deployment, error) {
 
 	replicas := int32(1)
 	if app.Spec.MinReplicas != nil {
@@ -155,7 +179,23 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 		}
 		return controllerutil.SetControllerReference(app, dep, r.Scheme)
 	})
-	return err
+	return dep, err
+}
+
+// availableCondition returns the Deployment's Available condition, or nil if
+// the Deployment is nil or has not reported one yet. meta.FindStatusCondition
+// doesn't work here: it takes []metav1.Condition, while Deployments use their
+// own appsv1.DeploymentCondition type.
+func availableCondition(dep *appsv1.Deployment) *appsv1.DeploymentCondition {
+	if dep == nil {
+		return nil
+	}
+	for i := range dep.Status.Conditions {
+		if dep.Status.Conditions[i].Type == appsv1.DeploymentAvailable {
+			return &dep.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 func (r *AppReconciler) reconcileService(ctx context.Context, app *platformatorv1alpha1.App) error {
