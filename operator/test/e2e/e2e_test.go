@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -44,6 +45,9 @@ const metricsServiceName = "operator-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "operator-metrics-binding"
+
+// appNamespace is the namespace the test Apps are created in
+const appNamespace = "default"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -280,6 +284,63 @@ var _ = Describe("Manager", Ordered, func() {
 		//    strings.ToLower(<Kind>),
 		// ))
 	})
+
+	// These tests create real App resources against the operator running in the
+	// kind cluster. Unlike envtest, the cluster has a real Deployment controller
+	// and the operator runs as its real ServiceAccount, so this catches missing
+	// RBAC permissions and checks that Ready tracks actual pod availability.
+	Context("App", func() {
+		It("should become Ready when its pods are available", func() {
+			const name = "e2e-hello"
+
+			By("creating an App with a working image")
+			applyApp(name, "traefik/whoami:latest")
+
+			By("waiting for the operator to reconcile it")
+			Eventually(func(g Gomega) {
+				status, err := appConditionStatus(name, "Reconciled")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).Should(Succeed())
+
+			By("checking the operator created every child resource")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get",
+					"deployment/"+name, "service/"+name, "ingress/"+name, "hpa/"+name,
+					"-n", appNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}).Should(Succeed())
+
+			By("waiting for Ready to turn True once the pod is up")
+			Eventually(func(g Gomega) {
+				status, err := appConditionStatus(name, "Ready")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).Should(Succeed())
+		})
+
+		It("should stay not Ready when its image cannot be pulled", func() {
+			const name = "e2e-hello-bad"
+
+			By("creating an App with an image that does not exist")
+			applyApp(name, "traefik/whoami:doesnotexist")
+
+			By("waiting for the operator to reconcile it (the API calls themselves succeed)")
+			Eventually(func(g Gomega) {
+				status, err := appConditionStatus(name, "Reconciled")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).Should(Succeed())
+
+			By("checking Ready stays False because no pod ever becomes available")
+			Consistently(func(g Gomega) {
+				status, err := appConditionStatus(name, "Ready")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("False"))
+			}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+		})
+	})
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
@@ -336,4 +397,52 @@ type tokenRequest struct {
 	Status struct {
 		Token string `json:"token"`
 	} `json:"status"`
+}
+
+// appManifest returns the YAML for a test App with the given name and image.
+func appManifest(name, image string) string {
+	return fmt.Sprintf(`apiVersion: platformator.alexanderbakin.com/v1alpha1
+kind: App
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: %s
+  port: 80
+  minReplicas: 1
+  maxReplicas: 3
+  env:
+    - name: KEY
+      value: value
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "50M"
+    limits:
+      cpu: "100m"
+      memory: "100M"
+`, name, appNamespace, image)
+}
+
+// applyApp creates (or updates) a test App and registers its deletion for the
+// end of the current spec, so a failing test doesn't leave Apps behind.
+func applyApp(name, image string) {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(appManifest(name, image))
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to apply App %s", name)
+
+	DeferCleanup(func() {
+		cmd := exec.Command("kubectl", "delete", "app", name,
+			"-n", appNamespace, "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	})
+}
+
+// appConditionStatus returns the status ("True", "False" or "" if the condition
+// has not been set yet) of the given condition type on an App.
+func appConditionStatus(name, conditionType string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "app", name, "-n", appNamespace,
+		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].status}`, conditionType))
+	return utils.Run(cmd)
 }
