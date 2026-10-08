@@ -4,9 +4,16 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 5 of 30.
+Day 10 of 30.
 
-Single-node k3s cluster running on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are now deployed through an `App` CRD and controller, which create the Deployment/Service/Ingress for you instead of applying them by hand. Apps now autoscale on real CPU usage too - each App's `minReplicas`/`maxReplicas`/`targetCPUUtilizationPercentage` translate into a `HorizontalPodAutoscaler` the controller manages alongside the Deployment/Service/Ingress.
+Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
+
+What the operator does today:
+
+- **Per-App spec:** image, port, optional env vars, required CPU/memory requests and limits (checked by a CEL rule on the CRD), and min/max replicas plus a target CPU utilization that become an HPA.
+- **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving.
+- **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `domain.env` through a Kustomize-generated ConfigMap, so it never lands in git.
+- **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
 
 ## Architecture
 
@@ -156,11 +163,27 @@ cd operator
 make install
 ```
 
-Run the controller locally against the cluster (not yet deployed in-cluster itself - that's a later day):
+Either run the controller locally against the cluster (it reads the base domain from `--domain` or the `DOMAIN` env var you exported earlier):
 
 ```bash
 make run
 ```
+
+Or run it in the cluster. The base domain goes in a gitignored file that Kustomize turns into a ConfigMap:
+
+```bash
+cp config/default/domain.env.example config/default/domain.env   # then set DOMAIN=<your domain>
+
+make docker-buildx IMG=ghcr.io/<you>/platformator-operator:<tag> PLATFORMS=linux/amd64
+make deploy IMG=ghcr.io/<you>/platformator-operator:<tag>
+```
+
+A few things that are easy to get wrong here:
+
+- `PLATFORMS` must match your nodes. On an arm64 Mac, a plain `docker-build` produces an image that fails with "exec format error" on amd64 nodes.
+- Use a new tag for every build and never overwrite one. Nodes cache images by tag, so a reused tag can leave the old code running.
+- The nodes must be able to pull the image: make the GHCR package public or configure an `imagePullSecret`.
+- `make deploy` rewrites the image in `config/manager/kustomization.yaml`, which is meant to be committed with the code that built it.
 
 In another terminal, apply a sample App:
 
@@ -172,9 +195,41 @@ curl "https://hello.$DOMAIN/"
 
 No `-k`, no warnings - a real Let's Encrypt cert, same as before, now provisioned by the operator instead of by hand.
 
+### Check an App's status
+
+```bash
+kubectl get app -w
+```
+
+The columns show the image and the two conditions. For example, an App whose image can't be pulled stays `Reconciled=True` (the API calls worked) but `Ready=False`:
+
+| Ready | Reason | Meaning |
+|---|---|---|
+| `True` | `DeploymentAvailable` | Rollout complete and Available |
+| `False` | `DeploymentUnavailable` | The Deployment has no minimum availability |
+| `False` | `RolloutInProgress` | A rollout is still going or stuck, even if old pods still serve |
+| `False` | `ProgressDeadlineExceeded` | The rollout made no progress within the Deployment's deadline |
+| `False` | `ReconcileError` | The last reconcile pass failed, see the `Reconciled` condition |
+
+### Tests
+
+```bash
+cd operator
+make test       # controller tests against a real API server (envtest)
+make lint
+make test-e2e   # needs Docker: creates a kind cluster, runs the real operator in it, deletes it
+```
+
+The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `domain.env.example` into place first, since the real domain file is gitignored.
+
 ## Posts
 
 1. [Day 1](https://lnkd.in/p/dk4nhxCg)
 2. [Day 2](https://lnkd.in/p/dJvCgHPF)
 3. [Day 3](https://lnkd.in/p/d59V8WEu)
 4. [Day 4](https://lnkd.in/p/ds2Crscn)
+5. [Day 5](https://lnkd.in/p/efpYRzii)
+6. [Day 6](https://lnkd.in/p/evxP87nm)
+7. [Day 7](https://lnkd.in/p/e3QzRS5H)
+8. [Day 8](https://lnkd.in/p/eK4_2NrF)
+9. [Day 9](https://lnkd.in/p/ewVprRZs)
