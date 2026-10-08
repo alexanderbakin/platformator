@@ -123,29 +123,78 @@ var _ = Describe("App Controller", func() {
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCondition.Reason).To(Equal("DeploymentUnavailable"))
 
-			By("Faking the Deployment becoming Available and reconciling again")
-			dep := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, dep)).To(Succeed())
-			dep.Status.Conditions = []appsv1.DeploymentCondition{{
-				Type:    appsv1.DeploymentAvailable,
-				Status:  corev1.ConditionTrue,
-				Reason:  "MinimumReplicasAvailable",
-				Message: "Deployment has minimum availability.",
-			}}
-			Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
+			// fakeStatus plays the role of the Deployment controller (absent in
+			// envtest): it rewrites the Deployment's status, reconciles, and
+			// returns the App's resulting Ready condition.
+			fakeStatus := func(mutate func(dep *appsv1.Deployment)) *metav1.Condition {
+				dep := &appsv1.Deployment{}
+				Expect(k8sClient.Get(ctx, typeNamespacedName, dep)).To(Succeed())
+				mutate(dep)
+				Expect(k8sClient.Status().Update(ctx, dep)).To(Succeed())
 
-			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
-				NamespacedName: typeNamespacedName,
-			})
-			Expect(err).NotTo(HaveOccurred())
+				_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: typeNamespacedName,
+				})
+				Expect(err).NotTo(HaveOccurred())
 
-			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
-			readyCondition = meta.FindStatusCondition(updated.Status.Conditions, "Ready")
-			Expect(readyCondition).NotTo(BeNil())
+				Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+				cond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+				Expect(cond).NotTo(BeNil())
+				return cond
+			}
+
+			// healthy marks the Deployment as fully rolled out and available.
+			healthy := func(dep *appsv1.Deployment) {
+				dep.Status.ObservedGeneration = dep.Generation
+				dep.Status.Replicas = 1
+				dep.Status.UpdatedReplicas = 1
+				dep.Status.AvailableReplicas = 1
+				dep.Status.ReadyReplicas = 1
+				dep.Status.Conditions = []appsv1.DeploymentCondition{{
+					Type:    appsv1.DeploymentAvailable,
+					Status:  corev1.ConditionTrue,
+					Reason:  "MinimumReplicasAvailable",
+					Message: "Deployment has minimum availability.",
+				}}
+			}
+
+			By("Faking a fully rolled out Deployment")
+			readyCondition = fakeStatus(healthy)
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCondition.Reason).To(Equal("DeploymentAvailable"))
 
+			By("Faking a stuck rollout: the old pod keeps Available=True, the new pod is never available")
+			readyCondition = fakeStatus(func(dep *appsv1.Deployment) {
+				healthy(dep)
+				dep.Status.Replicas = 2
+			})
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCondition.Reason).To(Equal("RolloutInProgress"))
+
+			By("Faking a Deployment controller that has not observed the latest spec yet")
+			readyCondition = fakeStatus(func(dep *appsv1.Deployment) {
+				healthy(dep)
+				dep.Status.ObservedGeneration = dep.Generation - 1
+			})
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCondition.Reason).To(Equal("RolloutInProgress"))
+
+			By("Faking a rollout that exceeded its progress deadline")
+			readyCondition = fakeStatus(func(dep *appsv1.Deployment) {
+				healthy(dep)
+				dep.Status.Replicas = 2
+				dep.Status.Conditions = append(dep.Status.Conditions, appsv1.DeploymentCondition{
+					Type:    appsv1.DeploymentProgressing,
+					Status:  corev1.ConditionFalse,
+					Reason:  "ProgressDeadlineExceeded",
+					Message: "ReplicaSet has timed out progressing.",
+				})
+			})
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCondition.Reason).To(Equal("ProgressDeadlineExceeded"))
+
 			By("Verifying the Deployment's container got the App's Env and Resources")
+			dep := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, dep)).To(Succeed())
 
 			Expect(dep.Spec.Template.Spec.Containers).To(HaveLen(1))

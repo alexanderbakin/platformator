@@ -56,6 +56,9 @@ var _ = Describe("Manager", Ordered, func() {
 	// enforce the restricted security policy to the namespace, installing CRDs,
 	// and deploying the controller.
 	BeforeAll(func() {
+		By("remembering config/manager/kustomization.yaml, which make deploy rewrites")
+		rememberKustomization()
+
 		By("creating manager namespace")
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
 		_, err := utils.Run(cmd)
@@ -96,6 +99,9 @@ var _ = Describe("Manager", Ordered, func() {
 		By("removing manager namespace")
 		cmd = exec.Command("kubectl", "delete", "ns", namespace)
 		_, _ = utils.Run(cmd)
+
+		By("restoring config/manager/kustomization.yaml")
+		restoreKustomization()
 	})
 
 	// After each test, check for failures and collect logs, events,
@@ -328,17 +334,70 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("waiting for the operator to reconcile it (the API calls themselves succeed)")
 			Eventually(func(g Gomega) {
-				status, err := appConditionStatus(name, "Reconciled")
+				status, err := appConditionField(name, "Reconciled", "status")
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(status).To(Equal("True"))
 			}).Should(Succeed())
 
-			By("checking Ready stays False because no pod ever becomes available")
+			By("waiting until the image pull has actually failed")
+			Eventually(func(g Gomega) {
+				reasons, err := podWaitingReasons(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reasons).To(ContainSubstring("ImagePull"))
+			}).Should(Succeed())
+
+			By("checking Ready is False and stays that way")
 			Consistently(func(g Gomega) {
-				status, err := appConditionStatus(name, "Ready")
+				status, err := appConditionField(name, "Ready", "status")
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(status).To(Equal("False"))
-			}).WithTimeout(30 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+			}).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
+		})
+
+		It("should report a failing rollout as not Ready while the old pod is still available", func() {
+			const name = "e2e-rollout"
+
+			By("creating a healthy App and waiting for Ready")
+			applyApp(name, "traefik/whoami:latest")
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).Should(Succeed())
+
+			By("updating the App to an image that cannot be pulled")
+			applyApp(name, "traefik/whoami:doesnotexist")
+
+			By("waiting until the new pod's image pull has failed")
+			Eventually(func(g Gomega) {
+				reasons, err := podWaitingReasons(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reasons).To(ContainSubstring("ImagePull"))
+			}).Should(Succeed())
+
+			By("checking the Deployment is still Available because the old pod keeps serving")
+			cmd := exec.Command("kubectl", "get", "deployment", name, "-n", appNamespace,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("True"))
+
+			By("checking Ready is nevertheless False because the rollout is not complete")
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("False"))
+				reason, err := appConditionField(name, "Ready", "reason")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("RolloutInProgress"))
+			}).Should(Succeed())
+
+			By("checking Ready does not flip back to True")
+			Consistently(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("False"))
+			}).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 		})
 	})
 })
@@ -439,10 +498,53 @@ func applyApp(name, image string) {
 	})
 }
 
+// appConditionField returns one field ("status", "reason" or "message") of the
+// given condition type on an App, or "" if the condition has not been set yet.
+func appConditionField(name, conditionType, field string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "app", name, "-n", appNamespace,
+		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].%s}`, conditionType, field))
+	return utils.Run(cmd)
+}
+
 // appConditionStatus returns the status ("True", "False" or "" if the condition
 // has not been set yet) of the given condition type on an App.
 func appConditionStatus(name, conditionType string) (string, error) {
-	cmd := exec.Command("kubectl", "get", "app", name, "-n", appNamespace,
-		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].status}`, conditionType))
+	return appConditionField(name, conditionType, "status")
+}
+
+// podWaitingReasons returns the space-separated "waiting" reasons (for example
+// ErrImagePull or ImagePullBackOff) of the containers in the App's pods.
+// Pods that are running have no waiting reason and contribute nothing.
+func podWaitingReasons(name string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "pods", "-n", appNamespace, "-l", "app="+name,
+		"-o", "jsonpath={.items[*].status.containerStatuses[*].state.waiting.reason}")
 	return utils.Run(cmd)
+}
+
+// kustomizationPath and kustomizationBackup hold the manager kustomization as
+// it was before the suite ran. "make deploy" rewrites that file in place
+// ("kustomize edit set image"), which would otherwise leave the repo with the
+// e2e test image after every run.
+var (
+	kustomizationPath   string
+	kustomizationBackup []byte
+)
+
+// rememberKustomization saves config/manager/kustomization.yaml.
+func rememberKustomization() {
+	projectDir, err := utils.GetProjectDir()
+	Expect(err).NotTo(HaveOccurred())
+
+	kustomizationPath = filepath.Join(projectDir, "config", "manager", "kustomization.yaml")
+	kustomizationBackup, err = os.ReadFile(kustomizationPath)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+// restoreKustomization writes back what rememberKustomization saved.
+func restoreKustomization() {
+	if kustomizationBackup == nil {
+		return
+	}
+	err := os.WriteFile(kustomizationPath, kustomizationBackup, os.FileMode(0o644))
+	Expect(err).NotTo(HaveOccurred())
 }

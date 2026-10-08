@@ -82,7 +82,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	// return statements below fires. It records two status conditions and
 	// persists them via the status subresource:
 	//   - Reconciled: did every API call in this pass succeed?
-	//   - Ready: is the Deployment actually Available (pods serving)?
+	//   - Ready: is the Deployment fully rolled out and Available (pods serving)?
 	defer func() {
 		reconciled := metav1.Condition{
 			Type:               "Reconciled",
@@ -95,11 +95,13 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			Type:               "Ready",
 			Status:             metav1.ConditionTrue,
 			Reason:             "DeploymentAvailable",
-			Message:            "Deployment has minimum availability",
+			Message:            "Deployment is fully rolled out and available",
 			ObservedGeneration: app.Generation,
 		}
 
-		avail := availableCondition(dep)
+		avail := deploymentCondition(dep, appsv1.DeploymentAvailable)
+		progressing := deploymentCondition(dep, appsv1.DeploymentProgressing)
+		rolledOut, rolloutMessage := rolloutComplete(dep)
 		switch {
 		case err != nil:
 			reconciled.Status = metav1.ConditionFalse
@@ -116,6 +118,17 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			ready.Status = metav1.ConditionFalse
 			ready.Reason = "DeploymentUnavailable"
 			ready.Message = avail.Message
+		case progressing != nil && progressing.Status == corev1.ConditionFalse &&
+			progressing.Reason == progressDeadlineExceeded:
+			// The rollout stalled: old pods may keep Available=True, but the
+			// new ones never became available within the progress deadline.
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = progressDeadlineExceeded
+			ready.Message = progressing.Message
+		case !rolledOut:
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = "RolloutInProgress"
+			ready.Message = rolloutMessage
 		}
 
 		meta.SetStatusCondition(&app.Status.Conditions, reconciled)
@@ -182,20 +195,50 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 	return dep, err
 }
 
-// availableCondition returns the Deployment's Available condition, or nil if
-// the Deployment is nil or has not reported one yet. meta.FindStatusCondition
-// doesn't work here: it takes []metav1.Condition, while Deployments use their
-// own appsv1.DeploymentCondition type.
-func availableCondition(dep *appsv1.Deployment) *appsv1.DeploymentCondition {
+// progressDeadlineExceeded is the Reason the Deployment controller puts on the
+// Progressing condition when a rollout has not made progress in time.
+const progressDeadlineExceeded = "ProgressDeadlineExceeded"
+
+// deploymentCondition returns the Deployment's condition of the given type, or
+// nil if the Deployment is nil or has not reported one yet.
+// meta.FindStatusCondition doesn't work here: it takes []metav1.Condition,
+// while Deployments use their own appsv1.DeploymentCondition type.
+func deploymentCondition(dep *appsv1.Deployment, condType appsv1.DeploymentConditionType) *appsv1.DeploymentCondition {
 	if dep == nil {
 		return nil
 	}
 	for i := range dep.Status.Conditions {
-		if dep.Status.Conditions[i].Type == appsv1.DeploymentAvailable {
+		if dep.Status.Conditions[i].Type == condType {
 			return &dep.Status.Conditions[i]
 		}
 	}
 	return nil
+}
+
+// rolloutComplete reports whether the Deployment has finished rolling out its
+// latest spec, using the same checks as "kubectl rollout status". Available=True
+// alone is not enough: during a rolling update the old pods keep it True while
+// the new pods can still be crashlooping.
+func rolloutComplete(dep *appsv1.Deployment) (bool, string) {
+	if dep == nil {
+		return false, "Deployment not found"
+	}
+	desired := int32(1)
+	if dep.Spec.Replicas != nil {
+		desired = *dep.Spec.Replicas
+	}
+	status := dep.Status
+	switch {
+	case status.ObservedGeneration < dep.Generation:
+		return false, "Waiting for the Deployment controller to observe the latest spec"
+	case status.UpdatedReplicas < desired:
+		return false, fmt.Sprintf("%d of %d replicas updated", status.UpdatedReplicas, desired)
+	case status.Replicas > status.UpdatedReplicas:
+		return false, fmt.Sprintf("%d old replicas pending termination", status.Replicas-status.UpdatedReplicas)
+	case status.AvailableReplicas < status.UpdatedReplicas:
+		return false, fmt.Sprintf("%d of %d updated replicas available", status.AvailableReplicas, status.UpdatedReplicas)
+	}
+	return true, ""
 }
 
 func (r *AppReconciler) reconcileService(ctx context.Context, app *platformatorv1alpha1.App) error {
