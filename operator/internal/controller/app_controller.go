@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -84,6 +85,18 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	//   - Reconciled: did every API call in this pass succeed?
 	//   - Ready: is the Deployment fully rolled out and Available (pods serving)?
 	defer func() {
+		// A conflict means someone else (typically the Deployment controller
+		// updating status) changed an object between our read and our write.
+		// That is not a real failure: keep the conditions from the last
+		// successful pass instead of flapping them to ReconcileError, and
+		// retry shortly with fresh copies of everything.
+		if err != nil && apierrors.IsConflict(err) {
+			log.V(1).Info("conflict while reconciling, requeueing", "error", err.Error())
+			result = ctrl.Result{RequeueAfter: time.Second}
+			err = nil
+			return
+		}
+
 		reconciled := metav1.Condition{
 			Type:               "Reconciled",
 			Status:             metav1.ConditionTrue,
@@ -135,7 +148,15 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		meta.SetStatusCondition(&app.Status.Conditions, ready)
 
 		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
-			log.Error(statusErr, "failed to update App status")
+			if apierrors.IsConflict(statusErr) {
+				// Our copy of the App is stale: retry with a fresh one so the
+				// status update is not lost.
+				if err == nil {
+					result = ctrl.Result{RequeueAfter: time.Second}
+				}
+			} else {
+				log.Error(statusErr, "failed to update App status")
+			}
 		}
 	}()
 
