@@ -174,6 +174,14 @@ Or run it in the cluster. The base domain goes in a gitignored file that Kustomi
 ```bash
 cp config/default/domain.env.example config/default/domain.env   # then set DOMAIN=<your domain>
 
+make deploy IMG=ghcr.io/<you>/platformator-operator:sha-<short commit>
+```
+
+CI builds and publishes the image, so there is no local build step. Every push to `main` that touches `operator/` runs the `Publish image` workflow, which pushes a `linux/amd64` + `linux/arm64` image tagged `sha-<first 7 chars of the commit>`. Pushing a git tag such as `v0.6.0` publishes it under that name. The workflow refuses to overwrite a tag that already exists, and fails if either platform is missing from the pushed image. The run summary shows the exact `make deploy` command.
+
+To build by hand instead (for example from an uncommitted change):
+
+```bash
 make docker-buildx IMG=ghcr.io/<you>/platformator-operator:<tag> PLATFORMS=linux/amd64
 make deploy IMG=ghcr.io/<you>/platformator-operator:<tag>
 ```

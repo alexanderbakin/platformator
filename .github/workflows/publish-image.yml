@@ -1,0 +1,97 @@
+name: Publish image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "operator/**"
+      - ".github/workflows/publish-image.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  IMAGE_NAME: platformator-operator
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish:
+    name: Build and push to GHCR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        working-directory: operator
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Work out the image reference
+        id: image
+        run: |
+          # A git tag publishes under its own name, anything else under the commit.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag="sha-${GITHUB_SHA::7}"
+          fi
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "ref=${repo}:${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Refuse to overwrite an existing tag
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          # Nodes cache images by tag, so a tag must never point at new code.
+          if docker buildx imagetools inspect "$IMAGE_REF" > /dev/null 2>&1; then
+            echo "::error::${IMAGE_REF} already exists, refusing to overwrite it"
+            exit 1
+          fi
+
+      - name: Build and push
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        # The same target as a local build. It ignores failures of the build
+        # command, so the next step is what proves the image was pushed.
+        run: make docker-buildx IMG="$IMAGE_REF" PLATFORMS="$PLATFORMS"
+
+      - name: Verify the pushed image
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+        run: |
+          docker buildx imagetools inspect "$IMAGE_REF" | tee inspect.txt
+          for platform in ${PLATFORMS//,/ }; do
+            grep -q "Platform: *${platform}" inspect.txt || {
+              echo "::error::${IMAGE_REF} has no ${platform} manifest"
+              exit 1
+            }
+          done
+          digest="$(grep -m1 '^Digest:' inspect.txt | awk '{print $2}')"
+          {
+            echo "### Published"
+            echo
+            echo "- Image: \`${IMAGE_REF}\`"
+            echo "- Digest: \`${digest}\`"
+            echo "- Platforms: \`${PLATFORMS}\`"
+            echo
+            echo "Deploy it with:"
+            echo
+            echo '```'
+            echo "make deploy IMG=${IMAGE_REF}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
