@@ -174,16 +174,16 @@ Or run it in the cluster. The base domain goes in a gitignored file that Kustomi
 ```bash
 cp config/default/domain.env.example config/default/domain.env   # then set DOMAIN=<your domain>
 
-make deploy IMG=ghcr.io/<you>/platformator-operator:sha-<short commit>
+make deploy-image IMG=ghcr.io/<you>/platformator-operator:v0.6.0-build.42
 ```
 
-CI builds and publishes the image, so there is no local build step. Every push to `main` that touches `operator/` runs the `Publish image` workflow, which pushes a `linux/amd64` + `linux/arm64` image tagged `sha-<first 7 chars of the commit>`. Pushing a git tag such as `v0.6.0` publishes it under that name. The workflow refuses to overwrite a tag that already exists, and fails if either platform is missing from the pushed image. The run summary shows the exact `make deploy` command.
+CI builds and publishes the image, so there is no local build step. Every push to `main` that touches `operator/` runs the `Publish image` workflow, which pushes a `linux/amd64` + `linux/arm64` image tagged `<latest version tag>-build.<run number>`, for example `v0.6.0-build.42`. Pushing a git tag such as `v0.6.0` publishes it under exactly that name, which is how a release is cut. The workflow refuses to overwrite a tag that already exists, and fails if either platform is missing from the pushed image. The run summary shows the exact `make deploy-image` command. `deploy-image` builds the manifests from a temporary copy of `config/`, so it never changes a tracked file and a deploy never needs a commit.
 
 To build by hand instead (for example from an uncommitted change):
 
 ```bash
 make docker-buildx IMG=ghcr.io/<you>/platformator-operator:<tag> PLATFORMS=linux/amd64
-make deploy IMG=ghcr.io/<you>/platformator-operator:<tag>
+make deploy-image IMG=ghcr.io/<you>/platformator-operator:<tag>
 ```
 
 A few things that are easy to get wrong here:
@@ -191,7 +191,7 @@ A few things that are easy to get wrong here:
 - `PLATFORMS` must match your nodes. On an arm64 Mac, a plain `docker-build` produces an image that fails with "exec format error" on amd64 nodes.
 - Use a new tag for every build and never overwrite one. Nodes cache images by tag, so a reused tag can leave the old code running.
 - The nodes must be able to pull the image: make the GHCR package public or configure an `imagePullSecret`.
-- `make deploy` rewrites the image in `config/manager/kustomization.yaml`, which is meant to be committed with the code that built it.
+- Use `make deploy-image`, not `make deploy`. The scaffolded `make deploy` rewrites the image in `config/manager/kustomization.yaml`, and committing that change only triggers another CI build that is one commit behind.
 
 In another terminal, apply a sample App:
 
