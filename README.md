@@ -219,6 +219,29 @@ The columns show the image and the two conditions. For example, an App whose ima
 | `False` | `ProgressDeadlineExceeded` | The rollout made no progress within the Deployment's deadline |
 | `False` | `ReconcileError` | The last reconcile pass failed, see the `Reconciled` condition |
 
+### Releasing the operator image
+
+Day to day, nothing needs tagging:
+
+1. Commit and push to `main`.
+2. CI runs lint, unit tests and e2e, and publishes `<latest version tag>-build.<run number>` (for example `v0.6.0-build.42`). The run summary prints the deploy command.
+3. Deploy it: `make deploy-image IMG=ghcr.io/<you>/platformator-operator:v0.6.0-build.42`.
+
+To cut a clean version, tag a commit on `main` after its checks are green, so a version number never points at an untested commit:
+
+```bash
+git tag v0.7.0
+git push origin v0.7.0
+```
+
+CI publishes exactly `v0.7.0`, and later builds from `main` become `v0.7.0-build.<N>`. Tags are never overwritten: a second run for the same tag fails on purpose. A release tag rebuilds the image from the same commit, so it has the same code as that commit's `-build.<N>` image but a different digest.
+
+To check what the cluster is running, compare the digest in the run summary with the pod:
+
+```bash
+kubectl get pod -n operator-system -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
+```
+
 ### Tests
 
 ```bash
