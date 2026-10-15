@@ -71,7 +71,7 @@ var _ = Describe("App Controller conflict handling", func() {
 			}).
 			Build()
 
-		reconciler := &AppReconciler{Client: c, Scheme: c.Scheme(), Domain: "example.com"}
+		reconciler := &AppReconciler{Client: c, Scheme: c.Scheme(), Domain: testDomain}
 		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: key})
 
 		By("returning no error and asking to be retried shortly")

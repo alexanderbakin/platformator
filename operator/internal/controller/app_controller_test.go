@@ -96,7 +96,7 @@ var _ = Describe("App Controller", func() {
 			controllerReconciler := &AppReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
-				Domain: "example.com",
+				Domain: testDomain,
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{

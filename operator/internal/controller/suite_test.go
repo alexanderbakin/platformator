@@ -47,6 +47,9 @@ var (
 	k8sClient client.Client
 )
 
+// testDomain is the base domain the reconcilers in these tests run with.
+const testDomain = "example.com"
+
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
 
