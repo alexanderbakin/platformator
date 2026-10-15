@@ -191,6 +191,8 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 		replicas = *app.Spec.MinReplicas
 	}
 
+	readiness, liveness := probesFor(app)
+
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 	}
@@ -208,12 +210,56 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 					Ports:     []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
 					Resources: app.Spec.Resources,
 					Env:       app.Spec.Env,
+
+					ReadinessProbe: readiness,
+					LivenessProbe:  liveness,
 				}},
 			},
 		}
 		return controllerutil.SetControllerReference(app, dep, r.Scheme)
 	})
 	return dep, err
+}
+
+// probesFor returns the readiness and liveness probes of an App.
+//
+// Readiness is always on. Without a probe Kubernetes treats a pod as ready as
+// soon as its container starts, even if nothing listens on the port, and the
+// App would report Ready=True. The default is a TCP connect to the App's port,
+// which works for any server. With spec.healthCheck, readiness becomes an HTTP
+// request and a liveness probe is added, so a hung process gets restarted.
+// There is no default liveness probe: a wrong guess would restart healthy apps.
+func probesFor(app *platformatorv1alpha1.App) (readiness, liveness *corev1.Probe) {
+	port := intstr.FromInt32(app.Spec.Port)
+
+	readiness = &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: port}},
+		PeriodSeconds:    5,
+		TimeoutSeconds:   1,
+		SuccessThreshold: 1,
+		FailureThreshold: 3,
+	}
+	if app.Spec.HealthCheck == nil {
+		return readiness, nil
+	}
+
+	httpGet := func() corev1.ProbeHandler {
+		return corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+			Path:   app.Spec.HealthCheck.Path,
+			Port:   port,
+			Scheme: corev1.URISchemeHTTP,
+		}}
+	}
+	readiness.ProbeHandler = httpGet()
+	liveness = &corev1.Probe{
+		ProbeHandler:        httpGet(),
+		InitialDelaySeconds: 10,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      1,
+		SuccessThreshold:    1,
+		FailureThreshold:    3,
+	}
+	return readiness, liveness
 }
 
 // progressDeadlineExceeded is the Reason the Deployment controller puts on the

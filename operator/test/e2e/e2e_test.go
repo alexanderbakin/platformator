@@ -354,6 +354,37 @@ var _ = Describe("Manager", Ordered, func() {
 			}).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 		})
 
+		It("should stay not Ready when the container runs but does not listen on the App's port", func() {
+			const name = "e2e-wrong-port"
+
+			By("creating an App whose image works but whose port is wrong")
+			applyAppOnPort(name, "traefik/whoami:latest", 9999)
+
+			By("waiting until the container is running")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", appNamespace, "-l", "app="+name,
+					"-o", "jsonpath={.items[*].status.containerStatuses[*].state.running.startedAt}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}).Should(Succeed())
+
+			By("checking Ready is False because the readiness probe fails, and stays that way")
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("False"))
+				reason, err := appConditionField(name, "Ready", "reason")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("DeploymentUnavailable"))
+			}).Should(Succeed())
+			Consistently(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("False"))
+			}).WithTimeout(15 * time.Second).WithPolling(3 * time.Second).Should(Succeed())
+		})
+
 		It("should report a failing rollout as not Ready while the old pod is still available", func() {
 			const name = "e2e-rollout"
 
@@ -460,6 +491,12 @@ type tokenRequest struct {
 
 // appManifest returns the YAML for a test App with the given name and image.
 func appManifest(name, image string) string {
+	return appManifestOnPort(name, image, 80)
+}
+
+// appManifestOnPort is appManifest with a custom port, to create an App whose
+// container runs but does not listen on the port the App declares.
+func appManifestOnPort(name, image string, port int) string {
 	return fmt.Sprintf(`apiVersion: platformator.alexanderbakin.com/v1alpha1
 kind: App
 metadata:
@@ -467,7 +504,7 @@ metadata:
   namespace: %s
 spec:
   image: %s
-  port: 80
+  port: %d
   minReplicas: 1
   maxReplicas: 3
   env:
@@ -480,14 +517,19 @@ spec:
     limits:
       cpu: "100m"
       memory: "100M"
-`, name, appNamespace, image)
+`, name, appNamespace, image, port)
 }
 
 // applyApp creates (or updates) a test App and registers its deletion for the
 // end of the current spec, so a failing test doesn't leave Apps behind.
 func applyApp(name, image string) {
+	applyAppOnPort(name, image, 80)
+}
+
+// applyAppOnPort is applyApp with a custom port.
+func applyAppOnPort(name, image string, port int) {
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(appManifest(name, image))
+	cmd.Stdin = strings.NewReader(appManifestOnPort(name, image, port))
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply App %s", name)
 

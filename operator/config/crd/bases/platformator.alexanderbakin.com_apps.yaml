@@ -213,6 +213,21 @@ spec:
                   - name
                   type: object
                 type: array
+              healthCheck:
+                description: |-
+                  healthCheck switches the probes from a TCP connect on the port to HTTP
+                  requests on a path, and adds a liveness probe. Without it, readiness is a
+                  TCP connect on the port and there is no liveness probe.
+                properties:
+                  path:
+                    description: |-
+                      path is the HTTP path that answers with a 2xx or 3xx status while the app
+                      is healthy, for example "/healthz". It is requested on the App's port.
+                    pattern: ^/
+                    type: string
+                required:
+                - path
+                type: object
               image:
                 minLength: 1
                 type: string

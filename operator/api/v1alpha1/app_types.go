@@ -33,6 +33,12 @@ type AppSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port"`
 
+	// healthCheck switches the probes from a TCP connect on the port to HTTP
+	// requests on a path, and adds a liveness probe. Without it, readiness is a
+	// TCP connect on the port and there is no liveness probe.
+	// +optional
+	HealthCheck *HealthCheck `json:"healthCheck,omitempty"`
+
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:default=1
@@ -55,6 +61,15 @@ type AppSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="('cpu' in self.limits && 'cpu' in self.requests && 'memory' in self.limits && 'memory' in self.requests) && !quantity(self.limits['cpu']).isLessThan(quantity(self.requests['cpu'])) && !quantity(self.limits['memory']).isLessThan(quantity(self.requests['memory']))",message="CPU and memory limits/requests must be set and limits must be greater than or equal to requests"
 	Resources corev1.ResourceRequirements `json:"resources"`
+}
+
+// HealthCheck configures the HTTP probes of an App.
+type HealthCheck struct {
+	// path is the HTTP path that answers with a 2xx or 3xx status while the app
+	// is healthy, for example "/healthz". It is requested on the App's port.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^/`
+	Path string `json:"path"`
 }
 
 // AppStatus defines the observed state of App.
