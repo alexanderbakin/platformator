@@ -28,7 +28,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,6 +54,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -78,6 +81,11 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	// dep is filled in by reconcileDeployment and read by the deferred
 	// closure below to decide whether the App is actually Ready.
 	var dep *appsv1.Deployment
+
+	// certCond is the CertificateReady condition. It stays nil until the
+	// Ingress has been reconciled, so a pass that fails earlier leaves the
+	// condition from the last successful pass untouched.
+	var certCond *metav1.Condition
 
 	// This runs right before Reconcile actually returns, whichever of the
 	// return statements below fires. It records two status conditions and
@@ -142,10 +150,24 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			ready.Status = metav1.ConditionFalse
 			ready.Reason = "RolloutInProgress"
 			ready.Message = rolloutMessage
+		case certCond != nil && certCond.Status == metav1.ConditionFalse:
+			// The pods are fine, but the App's HTTPS address would still show a
+			// certificate error. Unknown (no cert-manager) does not block.
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = reasonCertificateNotReady
+			ready.Message = "TLS certificate is not issued yet: " + certCond.Message
 		}
 
 		meta.SetStatusCondition(&app.Status.Conditions, reconciled)
 		meta.SetStatusCondition(&app.Status.Conditions, ready)
+		if certCond != nil {
+			meta.SetStatusCondition(&app.Status.Conditions, *certCond)
+			// Certificate changes are not watched (the CRD may not even be
+			// installed), so poll until cert-manager reports it issued.
+			if err == nil && certCond.Status == metav1.ConditionFalse && result.RequeueAfter == 0 {
+				result = ctrl.Result{RequeueAfter: certificatePollInterval}
+			}
+		}
 
 		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
 			if apierrors.IsConflict(statusErr) {
@@ -171,6 +193,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	if err = r.reconcileIngress(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
 	}
+	app.Status.URL = "https://" + r.hostFor(&app)
+	tls := r.certificateCondition(ctx, &app)
+	certCond = &tls
 
 	if err = r.reconcileHPA(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling HPA: %w", err)
@@ -328,7 +353,7 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *platformatorv
 
 	clusterIssuerName := "letsencrypt"
 	ingressClassName := "traefik"
-	host := fmt.Sprintf("%s.%s", app.Name, r.Domain)
+	host := r.hostFor(app)
 	pathType := networkingv1.PathTypePrefix
 
 	ing := &networkingv1.Ingress{
@@ -360,7 +385,7 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *platformatorv
 		}}
 		ing.Spec.TLS = []networkingv1.IngressTLS{{
 			Hosts:      []string{host},
-			SecretName: app.Name + "-tls",
+			SecretName: tlsSecretName(app),
 		}}
 		return controllerutil.SetControllerReference(app, ing, r.Scheme)
 	})
@@ -398,6 +423,105 @@ func (r *AppReconciler) reconcileHPA(ctx context.Context, app *platformatorv1alp
 		return controllerutil.SetControllerReference(app, hpa, r.Scheme)
 	})
 	return err
+}
+
+// hostFor returns the hostname the App is served on.
+func (r *AppReconciler) hostFor(app *platformatorv1alpha1.App) string {
+	return fmt.Sprintf("%s.%s", app.Name, r.Domain)
+}
+
+// tlsSecretName is the Secret the Ingress keeps its certificate in. cert-manager's
+// ingress-shim names the Certificate it creates after this Secret.
+func tlsSecretName(app *platformatorv1alpha1.App) string {
+	return app.Name + "-tls"
+}
+
+// Names of the CertificateReady condition and its reasons.
+const (
+	conditionCertificateReady     = "CertificateReady"
+	reasonCertManagerNotInstalled = "CertManagerNotInstalled"
+	reasonCertificatePending      = "CertificatePending"
+	reasonCertificateIssued       = "CertificateIssued"
+	reasonCertificateCheckFailed  = "CertificateCheckFailed"
+	reasonCertificateNotReady     = "CertificateNotReady"
+
+	// certManagerReadyType is the type of the Certificate condition that says
+	// whether the certificate has been issued.
+	certManagerReadyType = "Ready"
+
+	// certificatePollInterval is how often an App whose certificate is not
+	// issued yet is checked again.
+	certificatePollInterval = 10 * time.Second
+)
+
+// certificateGVK is cert-manager's Certificate. It is read as unstructured so
+// the operator needs neither cert-manager's Go module nor its CRDs to be
+// installed: without them the condition is just Unknown.
+var certificateGVK = schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"}
+
+// certificateCondition reports whether cert-manager has issued the App's TLS
+// certificate. It never fails the reconcile: TLS status is informational, and
+// issuing depends on things outside the cluster (DNS, the ACME server).
+func (r *AppReconciler) certificateCondition(
+	ctx context.Context, app *platformatorv1alpha1.App,
+) metav1.Condition {
+	cond := metav1.Condition{Type: conditionCertificateReady, ObservedGeneration: app.Generation}
+
+	cert := &unstructured.Unstructured{}
+	cert.SetGroupVersionKind(certificateGVK)
+	err := r.Get(ctx, client.ObjectKey{Namespace: app.Namespace, Name: tlsSecretName(app)}, cert)
+	switch {
+	case err == nil:
+		return certificateReadiness(cert, app.Generation)
+	case meta.IsNoMatchError(err):
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonCertManagerNotInstalled
+		cond.Message = "The cert-manager Certificate CRD is not installed, so TLS status is unknown"
+	case apierrors.IsNotFound(err):
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonCertificatePending
+		cond.Message = "cert-manager has not created the Certificate yet"
+	default:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonCertificateCheckFailed
+		cond.Message = err.Error()
+	}
+	return cond
+}
+
+// certificateReadiness turns the Ready condition of a cert-manager Certificate
+// into the App's CertificateReady condition.
+func certificateReadiness(cert *unstructured.Unstructured, generation int64) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               conditionCertificateReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonCertificatePending,
+		Message:            "cert-manager has not reported a Ready condition yet",
+		ObservedGeneration: generation,
+	}
+
+	conditions, _, _ := unstructured.NestedSlice(cert.Object, "status", "conditions")
+	for _, item := range conditions {
+		c, ok := item.(map[string]any)
+		if !ok || c["type"] != certManagerReadyType {
+			continue
+		}
+		if c["status"] == "True" {
+			cond.Status = metav1.ConditionTrue
+			cond.Reason = reasonCertificateIssued
+			cond.Message = "cert-manager issued the TLS certificate"
+			return cond
+		}
+		// Keep cert-manager's own reason and message (Issuing, Pending, ...).
+		if reason, _ := c["reason"].(string); reason != "" {
+			cond.Reason = reason
+		}
+		if message, _ := c["message"].(string); message != "" {
+			cond.Message = message
+		}
+		return cond
+	}
+	return cond
 }
 
 // SetupWithManager sets up the controller with the Manager.

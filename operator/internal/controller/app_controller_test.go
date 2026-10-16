@@ -123,6 +123,13 @@ var _ = Describe("App Controller", func() {
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 			Expect(readyCondition.Reason).To(Equal("DeploymentUnavailable"))
 
+			By("Verifying the App reports its URL and, without cert-manager, an unknown TLS status")
+			Expect(updated.Status.URL).To(Equal("https://" + resourceName + "." + testDomain))
+			tlsCondition := meta.FindStatusCondition(updated.Status.Conditions, conditionCertificateReady)
+			Expect(tlsCondition).NotTo(BeNil())
+			Expect(tlsCondition.Status).To(Equal(metav1.ConditionUnknown))
+			Expect(tlsCondition.Reason).To(Equal(reasonCertManagerNotInstalled))
+
 			// fakeStatus plays the role of the Deployment controller (absent in
 			// envtest): it rewrites the Deployment's status, reconciles, and
 			// returns the App's resulting Ready condition.

@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 12 of 30.
+Day 13 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -12,7 +12,8 @@ What the operator does today:
 
 - **Per-App spec:** image, port, optional `healthCheck.path`, optional env vars, required CPU/memory requests and limits (checked by a CEL rule on the CRD), and min/max replicas plus a target CPU utilization that become an HPA.
 - **Health probes:** every App gets a readiness probe, a TCP connect on its port, so a pod whose process isn't listening is never counted as available. With `healthCheck.path` (for example `/healthz`, must start with `/`) readiness becomes an HTTP request on that path and a liveness probe is added, so a hung process gets restarted. There is no default liveness probe, because a wrong guess would restart healthy apps.
-- **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving.
+- **Public URL and TLS status:** `status.url` holds the address the App is served on, and the `CertificateReady` condition follows the cert-manager Certificate for it (`True` once issued, `False` with cert-manager's own reason while pending, `Unknown` if cert-manager isn't installed).
+- **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available and, if cert-manager is installed, the TLS certificate is issued. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving, and while the certificate is pending.
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `domain.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
 
@@ -210,15 +211,28 @@ No `-k`, no warnings - a real Let's Encrypt cert, same as before, now provisione
 kubectl get app -w
 ```
 
-The columns show the image and the two conditions. For example, an App whose image can't be pulled stays `Reconciled=True` (the API calls worked) but `Ready=False`:
+The columns show the image, the public URL, the two conditions, the reason for `Ready`, and the TLS status (the `CertificateReady` condition). For example, an App whose image can't be pulled stays `Reconciled=True` (the API calls worked) but `Ready=False`:
 
 | Ready | Reason | Meaning |
 |---|---|---|
 | `True` | `DeploymentAvailable` | Rollout complete and Available |
 | `False` | `DeploymentUnavailable` | The Deployment has no minimum availability, for example the pod can't start or fails its readiness probe |
 | `False` | `RolloutInProgress` | A rollout is still going or stuck, even if old pods still serve |
+| `False` | `CertificateNotReady` | The pods are fine but the TLS certificate isn't issued yet, see the message and the `CertificateReady` condition |
 | `False` | `ProgressDeadlineExceeded` | The rollout made no progress within the Deployment's deadline |
 | `False` | `ReconcileError` | The last reconcile pass failed, see the `Reconciled` condition |
+
+The TLS column and `kubectl describe app` show the certificate state:
+
+| CertificateReady | Reason | Meaning |
+|---|---|---|
+| `True` | `CertificateIssued` | cert-manager issued the certificate |
+| `False` | `CertificatePending` | cert-manager has not created the Certificate or reported its state yet |
+| `False` | cert-manager's reason (for example `DoesNotExist`, `Issuing`) | Issuance is in progress or failing, see the message |
+| `Unknown` | `CertManagerNotInstalled` | The Certificate CRD isn't installed, so there is nothing to check |
+| `Unknown` | `CertificateCheckFailed` | The operator could not read the Certificate, see the message |
+
+An App whose certificate isn't issued yet is checked again every 10 seconds.
 
 ### Releasing the operator image
 
@@ -267,3 +281,4 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 9. [Day 9](https://lnkd.in/p/ewVprRZs)
 10. [Day 10](https://lnkd.in/p/eUdMdwjq)
 11. [Day 11](https://lnkd.in/p/emPCUxhH)
+12. [Day 12](https://lnkd.in/p/dFq4ZuKn)

@@ -41,6 +41,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - cert-manager.io
+  resources:
+  - certificates
+  verbs:
+  - get
+- apiGroups:
   - networking.k8s.io
   resources:
   - ingresses

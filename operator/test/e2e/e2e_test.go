@@ -299,6 +299,9 @@ var _ = Describe("Manager", Ordered, func() {
 		It("should become Ready when its pods are available", func() {
 			const name = "e2e-hello"
 
+			By("creating a self-signed ClusterIssuer so the App's certificate can be issued")
+			ensureSelfSignedIssuer()
+
 			By("creating an App with a working image")
 			applyApp(name, "traefik/whoami:latest")
 
@@ -324,6 +327,64 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(status).To(Equal("True"))
 			}).Should(Succeed())
+		})
+
+		It("should report its URL and the status of its TLS certificate", func() {
+			const name = "e2e-tls"
+
+			By("creating a self-signed ClusterIssuer named like the one the operator uses")
+			ensureSelfSignedIssuer()
+
+			By("creating an App")
+			applyApp(name, "traefik/whoami:latest")
+
+			By("checking the App reports its public URL")
+			Eventually(func(g Gomega) {
+				url, err := appStatusField(name, "url")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(url).To(HavePrefix("https://" + name + "."))
+			}).Should(Succeed())
+
+			By("waiting for cert-manager to issue the certificate and the App to report it")
+			Eventually(func(g Gomega) {
+				status, err := appConditionStatus(name, "CertificateReady")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).WithTimeout(3 * time.Minute).Should(Succeed())
+		})
+
+		It("should stay not Ready until its TLS certificate is issued", func() {
+			const name = "e2e-cert-wait"
+
+			By("creating an App while no ClusterIssuer exists, so no certificate can be issued")
+			applyApp(name, "traefik/whoami:latest")
+
+			By("waiting until the Deployment is Available")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", name, "-n", appNamespace,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Available")].status}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}).Should(Succeed())
+
+			By("checking Ready is False because the certificate is missing, not because of the pods")
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("False"))
+				reason, err := appConditionField(name, "Ready", "reason")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reason).To(Equal("CertificateNotReady"))
+			}).Should(Succeed())
+
+			By("creating the ClusterIssuer and waiting for Ready to turn True")
+			ensureSelfSignedIssuer()
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).WithTimeout(3 * time.Minute).Should(Succeed())
 		})
 
 		It("should stay not Ready when its image cannot be pulled", func() {
@@ -387,6 +448,9 @@ var _ = Describe("Manager", Ordered, func() {
 
 		It("should report a failing rollout as not Ready while the old pod is still available", func() {
 			const name = "e2e-rollout"
+
+			By("creating a self-signed ClusterIssuer so the App's certificate can be issued")
+			ensureSelfSignedIssuer()
 
 			By("creating a healthy App and waiting for Ready")
 			applyApp(name, "traefik/whoami:latest")
@@ -547,6 +611,41 @@ func appConditionField(name, conditionType, field string) (string, error) {
 		"-o", fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="%s")].%s}`, conditionType, field))
 	return utils.Run(cmd)
 }
+
+// appStatusField returns one field of an App's status, for example "url", or ""
+// if it has not been set yet.
+func appStatusField(name, field string) (string, error) {
+	cmd := exec.Command("kubectl", "get", "app", name, "-n", appNamespace,
+		"-o", "jsonpath={.status."+field+"}")
+	return utils.Run(cmd)
+}
+
+// ensureSelfSignedIssuer creates a self-signed ClusterIssuer named like the one
+// the operator puts on every Ingress, so the kind cluster can issue certificates
+// without an ACME server, and removes it at the end of the current spec. An App
+// only becomes Ready once its certificate is issued, so specs that expect Ready
+// call this first.
+func ensureSelfSignedIssuer() {
+	cmd := exec.Command("kubectl", "apply", "-f", "-")
+	cmd.Stdin = strings.NewReader(selfSignedIssuer)
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "Failed to create the ClusterIssuer")
+
+	DeferCleanup(func() {
+		cmd := exec.Command("kubectl", "delete", "clusterissuer", "letsencrypt", "--ignore-not-found")
+		_, _ = utils.Run(cmd)
+	})
+}
+
+// selfSignedIssuer is a cert-manager ClusterIssuer that signs certificates
+// itself, named like the issuer the operator puts on every Ingress.
+const selfSignedIssuer = `apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  selfSigned: {}
+`
 
 // appConditionStatus returns the status ("True", "False" or "" if the condition
 // has not been set yet) of the given condition type on an App.

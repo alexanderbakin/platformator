@@ -18,6 +18,9 @@ spec:
     - jsonPath: .spec.image
       name: Image
       type: string
+    - jsonPath: .status.url
+      name: URL
+      type: string
     - jsonPath: .status.conditions[?(@.type=="Reconciled")].status
       name: Reconciled
       type: string
@@ -26,6 +29,9 @@ spec:
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].reason
       name: Reason
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="CertificateReady")].status
+      name: TLS
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -398,6 +404,10 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              url:
+                description: url is the public address of the App, set once its Ingress
+                  exists.
+                type: string
             type: object
         required:
         - spec
