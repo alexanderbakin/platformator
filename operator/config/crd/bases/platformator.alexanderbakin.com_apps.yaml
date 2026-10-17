@@ -15,27 +15,31 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.image
-      name: Image
-      type: string
-    - jsonPath: .status.url
-      name: URL
-      type: string
-    - jsonPath: .status.conditions[?(@.type=="Reconciled")].status
-      name: Reconciled
-      type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].status
       name: Ready
       type: string
     - jsonPath: .status.conditions[?(@.type=="Ready")].reason
       name: Reason
       type: string
-    - jsonPath: .status.conditions[?(@.type=="CertificateReady")].status
-      name: TLS
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .spec.image
+      name: Image
+      priority: 1
+      type: string
+    - jsonPath: .status.url
+      name: URL
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Reconciled")].status
+      name: Reconciled
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="CertificateReady")].status
+      name: TLS
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -221,31 +225,47 @@ spec:
                 type: array
               healthCheck:
                 description: |-
-                  healthCheck switches the probes from a TCP connect on the port to HTTP
-                  requests on a path, and adds a liveness probe. Without it, readiness is a
-                  TCP connect on the port and there is no liveness probe.
+                  healthCheck switches readiness from a TCP connect on the port to an HTTP
+                  request on a path, and can add a liveness probe on a separate path.
+                  Without it, readiness is a TCP connect on the port and there is no
+                  liveness probe.
                 properties:
+                  livenessPath:
+                    description: |-
+                      livenessPath adds a liveness probe on this HTTP path. Keep it cheap and
+                      independent of other services (for example "/livez"): a failing liveness
+                      probe restarts the container, so if it checked a database, a database
+                      outage would restart every pod at once. Without it there is no liveness
+                      probe.
+                    pattern: ^/\S*$
+                    type: string
                   path:
                     description: |-
                       path is the HTTP path that answers with a 2xx or 3xx status while the app
-                      is healthy, for example "/healthz". It is requested on the App's port.
-                    pattern: ^/
+                      is ready to receive traffic, for example "/healthz". It is requested on
+                      the App's port and is used for the readiness probe only. It may check
+                      dependencies such as a database: a failing readiness probe only takes the
+                      pod out of the Service, it does not restart it.
+                    pattern: ^/\S*$
                     type: string
                 required:
                 - path
                 type: object
               image:
+                description: image is the container image to run, for example "nginx:1.27".
+                maxLength: 255
                 minLength: 1
+                pattern: ^\S+$
                 type: string
               maxReplicas:
                 default: 1
                 format: int32
-                minimum: 0
+                minimum: 1
                 type: integer
               minReplicas:
                 default: 1
                 format: int32
-                minimum: 0
+                minimum: 1
                 type: integer
               port:
                 format: int32
@@ -321,7 +341,7 @@ spec:
                 default: 50
                 format: int32
                 maximum: 100
-                minimum: 0
+                minimum: 1
                 type: integer
             required:
             - image
@@ -412,6 +432,12 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: name must be a DNS label (lowercase letters, digits and dashes,
+            starting with a letter, at most 63 characters) because it becomes the
+            Service name and the hostname
+          rule: self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name)
+            <= 63
     served: true
     storage: true
     subresources:

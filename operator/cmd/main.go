@@ -191,9 +191,10 @@ func main() {
 	}
 
 	if err := (&controller.AppReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Domain: domain,
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Domain:   domain,
+		Recorder: mgr.GetEventRecorder("app-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")
 		os.Exit(1)

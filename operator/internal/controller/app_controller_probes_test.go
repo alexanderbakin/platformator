@@ -32,15 +32,21 @@ import (
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
 )
 
+// Health check paths used by the probe tests.
+const (
+	readyPath = "/healthz"
+	livePath  = "/livez"
+)
+
 var _ = Describe("App Controller probes", func() {
 	ctx := context.Background()
 
 	// newApp builds a valid App on port 8080 with the given health check.
 	newApp := func(name string, healthCheck *platformatorv1alpha1.HealthCheck) *platformatorv1alpha1.App {
 		return &platformatorv1alpha1.App{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
 			Spec: platformatorv1alpha1.AppSpec{
-				Image:       "nginx:latest",
+				Image:       testImage,
 				Port:        8080,
 				HealthCheck: healthCheck,
 				MinReplicas: new(int32(1)),
@@ -88,18 +94,32 @@ var _ = Describe("App Controller probes", func() {
 		Expect(container.LivenessProbe).To(BeNil())
 	})
 
-	It("uses HTTP readiness and liveness probes when a health check path is set", func() {
-		container := reconcileApp(newApp("probe-http", &platformatorv1alpha1.HealthCheck{Path: "/healthz"}))
+	It("uses an HTTP readiness probe and no liveness probe when only a path is set", func() {
+		container := reconcileApp(newApp("probe-http", &platformatorv1alpha1.HealthCheck{Path: readyPath}))
 
 		Expect(container.ReadinessProbe).NotTo(BeNil())
 		Expect(container.ReadinessProbe.TCPSocket).To(BeNil())
 		Expect(container.ReadinessProbe.HTTPGet).NotTo(BeNil())
-		Expect(container.ReadinessProbe.HTTPGet.Path).To(Equal("/healthz"))
+		Expect(container.ReadinessProbe.HTTPGet.Path).To(Equal(readyPath))
 		Expect(container.ReadinessProbe.HTTPGet.Port.IntValue()).To(Equal(8080))
+
+		// Restarting on a failing dependency check would be harmful, so the
+		// readiness path is never reused for liveness.
+		Expect(container.LivenessProbe).To(BeNil())
+	})
+
+	It("adds a liveness probe on its own path when livenessPath is set", func() {
+		container := reconcileApp(newApp("probe-liveness", &platformatorv1alpha1.HealthCheck{
+			Path:         readyPath,
+			LivenessPath: livePath,
+		}))
+
+		Expect(container.ReadinessProbe.HTTPGet).NotTo(BeNil())
+		Expect(container.ReadinessProbe.HTTPGet.Path).To(Equal(readyPath))
 
 		Expect(container.LivenessProbe).NotTo(BeNil())
 		Expect(container.LivenessProbe.HTTPGet).NotTo(BeNil())
-		Expect(container.LivenessProbe.HTTPGet.Path).To(Equal("/healthz"))
+		Expect(container.LivenessProbe.HTTPGet.Path).To(Equal(livePath))
 		Expect(container.LivenessProbe.HTTPGet.Port.IntValue()).To(Equal(8080))
 		// A slow-starting app must not be restarted before it can answer.
 		Expect(container.LivenessProbe.InitialDelaySeconds).To(BeNumerically(">", 0))
@@ -107,6 +127,16 @@ var _ = Describe("App Controller probes", func() {
 
 	It("rejects a health check path without a leading slash", func() {
 		err := k8sClient.Create(ctx, newApp("probe-invalid", &platformatorv1alpha1.HealthCheck{Path: "healthz"}))
+
+		Expect(err).To(HaveOccurred())
+		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)
+	})
+
+	It("rejects a liveness path without a leading slash", func() {
+		err := k8sClient.Create(ctx, newApp("probe-invalid-live", &platformatorv1alpha1.HealthCheck{
+			Path:         readyPath,
+			LivenessPath: "livez",
+		}))
 
 		Expect(err).To(HaveOccurred())
 		Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected an Invalid error, got: %v", err)

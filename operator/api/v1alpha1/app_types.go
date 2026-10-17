@@ -24,8 +24,11 @@ import (
 
 // +kubebuilder:validation:XValidation:rule="!has(self.minReplicas) || !has(self.maxReplicas) || self.maxReplicas >= self.minReplicas",message="maxReplicas must be greater than or equal to minReplicas"
 type AppSpec struct {
+	// image is the container image to run, for example "nginx:1.27".
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=255
+	// +kubebuilder:validation:Pattern=`^\S+$`
 	Image string `json:"image"`
 
 	// +kubebuilder:validation:Required
@@ -33,24 +36,25 @@ type AppSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port"`
 
-	// healthCheck switches the probes from a TCP connect on the port to HTTP
-	// requests on a path, and adds a liveness probe. Without it, readiness is a
-	// TCP connect on the port and there is no liveness probe.
+	// healthCheck switches readiness from a TCP connect on the port to an HTTP
+	// request on a path, and can add a liveness probe on a separate path.
+	// Without it, readiness is a TCP connect on the port and there is no
+	// liveness probe.
 	// +optional
 	HealthCheck *HealthCheck `json:"healthCheck,omitempty"`
 
 	// +optional
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	MinReplicas *int32 `json:"minReplicas,omitempty"`
 
 	// +optional
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	MaxReplicas *int32 `json:"maxReplicas,omitempty"`
 
 	// +optional
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	// +kubebuilder:default=50
 	TargetCPUUtilizationPercentage *int32 `json:"targetCPUUtilizationPercentage,omitempty"`
@@ -66,10 +70,22 @@ type AppSpec struct {
 // HealthCheck configures the HTTP probes of an App.
 type HealthCheck struct {
 	// path is the HTTP path that answers with a 2xx or 3xx status while the app
-	// is healthy, for example "/healthz". It is requested on the App's port.
+	// is ready to receive traffic, for example "/healthz". It is requested on
+	// the App's port and is used for the readiness probe only. It may check
+	// dependencies such as a database: a failing readiness probe only takes the
+	// pod out of the Service, it does not restart it.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^/`
+	// +kubebuilder:validation:Pattern=`^/\S*$`
 	Path string `json:"path"`
+
+	// livenessPath adds a liveness probe on this HTTP path. Keep it cheap and
+	// independent of other services (for example "/livez"): a failing liveness
+	// probe restarts the container, so if it checked a database, a database
+	// outage would restart every pod at once. Without it there is no liveness
+	// probe.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^/\S*$`
+	LivenessPath string `json:"livenessPath,omitempty"`
 }
 
 // AppStatus defines the observed state of App.
@@ -101,13 +117,14 @@ type AppStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.image`
-// +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
-// +kubebuilder:printcolumn:name="Reconciled",type=string,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
-// +kubebuilder:printcolumn:name="TLS",type=string,JSONPath=`.status.conditions[?(@.type=="CertificateReady")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="Image",type=string,priority=1,JSONPath=`.spec.image`
+// +kubebuilder:printcolumn:name="URL",type=string,priority=1,JSONPath=`.status.url`
+// +kubebuilder:printcolumn:name="Reconciled",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`
+// +kubebuilder:printcolumn:name="TLS",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="CertificateReady")].status`
+// +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name) <= 63",message="name must be a DNS label (lowercase letters, digits and dashes, starting with a letter, at most 63 characters) because it becomes the Service name and the hostname"
 
 // App is the Schema for the apps API
 type App struct {

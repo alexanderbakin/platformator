@@ -59,7 +59,7 @@ var _ = Describe("App Controller", func() {
 						Namespace: resourceNamespace,
 					},
 					Spec: platformatorv1alpha1.AppSpec{
-						Image:       "nginx:latest",
+						Image:       testImage,
 						Port:        80,
 						MinReplicas: new(int32(1)),
 						MaxReplicas: new(int32(1)),

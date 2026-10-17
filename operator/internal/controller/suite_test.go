@@ -47,8 +47,15 @@ var (
 	k8sClient client.Client
 )
 
-// testDomain is the base domain the reconcilers in these tests run with.
-const testDomain = "example.com"
+// Values shared by the test Apps.
+const (
+	// testDomain is the base domain the reconcilers in these tests run with.
+	testDomain = "example.com"
+	// testNamespace is the namespace the test Apps live in.
+	testNamespace = "default"
+	// testImage is the container image of the test Apps.
+	testImage = "nginx:latest"
+)
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)

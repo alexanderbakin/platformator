@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -45,6 +46,10 @@ type AppReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Domain string
+
+	// Recorder publishes Kubernetes Events about each App, visible in
+	// `kubectl describe app`. It may be nil (tests), then no events are sent.
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps,verbs=get;list;watch;create;update;patch;delete
@@ -55,6 +60,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -126,10 +132,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		switch {
 		case err != nil:
 			reconciled.Status = metav1.ConditionFalse
-			reconciled.Reason = "ReconcileError"
+			reconciled.Reason = reasonReconcileError
 			reconciled.Message = err.Error()
 			ready.Status = metav1.ConditionFalse
-			ready.Reason = "ReconcileError"
+			ready.Reason = reasonReconcileError
 			ready.Message = "Reconcile failed, see the Reconciled condition"
 		case avail == nil:
 			ready.Status = metav1.ConditionFalse
@@ -158,6 +164,8 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			ready.Message = "TLS certificate is not issued yet: " + certCond.Message
 		}
 
+		previous := conditionsByType(app.Status.Conditions)
+
 		meta.SetStatusCondition(&app.Status.Conditions, reconciled)
 		meta.SetStatusCondition(&app.Status.Conditions, ready)
 		if certCond != nil {
@@ -179,6 +187,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			} else {
 				log.Error(statusErr, "failed to update App status")
 			}
+		} else {
+			// Events are sent only after the new status is stored, so a lost
+			// update (conflict) does not announce the same change twice.
+			r.emitTransitionEvents(&app, previous, reconciled, ready, certCond)
 		}
 	}()
 
@@ -251,8 +263,14 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 // Readiness is always on. Without a probe Kubernetes treats a pod as ready as
 // soon as its container starts, even if nothing listens on the port, and the
 // App would report Ready=True. The default is a TCP connect to the App's port,
-// which works for any server. With spec.healthCheck, readiness becomes an HTTP
-// request and a liveness probe is added, so a hung process gets restarted.
+// which works for any server. With spec.healthCheck.path, readiness becomes an
+// HTTP request on that path.
+//
+// Liveness is off unless spec.healthCheck.livenessPath is set, and it never
+// reuses the readiness path. A readiness path may check dependencies such as a
+// database, which is fine because a failing readiness probe only removes the
+// pod from the Service. A failing liveness probe restarts the container, so
+// sharing the path would restart every pod at once during a database outage.
 // There is no default liveness probe: a wrong guess would restart healthy apps.
 func probesFor(app *platformatorv1alpha1.App) (readiness, liveness *corev1.Probe) {
 	port := intstr.FromInt32(app.Spec.Port)
@@ -268,16 +286,19 @@ func probesFor(app *platformatorv1alpha1.App) (readiness, liveness *corev1.Probe
 		return readiness, nil
 	}
 
-	httpGet := func() corev1.ProbeHandler {
+	httpGet := func(path string) corev1.ProbeHandler {
 		return corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
-			Path:   app.Spec.HealthCheck.Path,
+			Path:   path,
 			Port:   port,
 			Scheme: corev1.URISchemeHTTP,
 		}}
 	}
-	readiness.ProbeHandler = httpGet()
+	readiness.ProbeHandler = httpGet(app.Spec.HealthCheck.Path)
+	if app.Spec.HealthCheck.LivenessPath == "" {
+		return readiness, nil
+	}
 	liveness = &corev1.Probe{
-		ProbeHandler:        httpGet(),
+		ProbeHandler:        httpGet(app.Spec.HealthCheck.LivenessPath),
 		InitialDelaySeconds: 10,
 		PeriodSeconds:       10,
 		TimeoutSeconds:      1,
@@ -522,6 +543,69 @@ func certificateReadiness(cert *unstructured.Unstructured, generation int64) met
 		return cond
 	}
 	return cond
+}
+
+// conditionsByType returns a copy of the conditions keyed by type, so the
+// values stay unchanged when meta.SetStatusCondition edits the slice in place.
+func conditionsByType(conditions []metav1.Condition) map[string]metav1.Condition {
+	byType := make(map[string]metav1.Condition, len(conditions))
+	for _, c := range conditions {
+		byType[c.Type] = c
+	}
+	return byType
+}
+
+// reasonReconcileError is the reason of Reconciled and Ready when a pass failed.
+const reasonReconcileError = "ReconcileError"
+
+// Event actions, as shown in the "Action" field of the Event.
+const (
+	eventActionReconcile = "Reconcile"
+	eventActionRollout   = "Rollout"
+	eventActionTLS       = "TLS"
+)
+
+// emitTransitionEvents publishes an Event when the Ready or Reconciled
+// condition changed its status or reason, and when the certificate gets
+// issued. Reconcile runs often, so events are tied to changes rather than to
+// every pass, otherwise `kubectl describe` would drown in repeats.
+func (r *AppReconciler) emitTransitionEvents(
+	app *platformatorv1alpha1.App,
+	previous map[string]metav1.Condition,
+	reconciled, ready metav1.Condition,
+	certCond *metav1.Condition,
+) {
+	if r.Recorder == nil {
+		return
+	}
+	changed := func(prev metav1.Condition, found bool, now metav1.Condition) bool {
+		return !found || prev.Status != now.Status || prev.Reason != now.Reason
+	}
+
+	prevReconciled, found := previous[reconciled.Type]
+	if changed(prevReconciled, found, reconciled) {
+		eventType := corev1.EventTypeNormal
+		if reconciled.Status == metav1.ConditionFalse {
+			eventType = corev1.EventTypeWarning
+		}
+		r.Recorder.Eventf(app, nil, eventType, reconciled.Reason, eventActionReconcile, "%s", reconciled.Message)
+	}
+
+	prevReady, found := previous[ready.Type]
+	if changed(prevReady, found, ready) {
+		eventType := corev1.EventTypeNormal
+		if ready.Reason == reasonReconcileError || ready.Reason == progressDeadlineExceeded {
+			eventType = corev1.EventTypeWarning
+		}
+		r.Recorder.Eventf(app, nil, eventType, ready.Reason, eventActionRollout, "%s", ready.Message)
+	}
+
+	if certCond != nil && certCond.Status == metav1.ConditionTrue {
+		prevCert, found := previous[certCond.Type]
+		if !found || prevCert.Status != metav1.ConditionTrue {
+			r.Recorder.Eventf(app, nil, corev1.EventTypeNormal, certCond.Reason, eventActionTLS, "%s", certCond.Message)
+		}
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

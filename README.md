@@ -10,10 +10,11 @@ Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Le
 
 What the operator does today:
 
-- **Per-App spec:** image, port, optional `healthCheck.path`, optional env vars, required CPU/memory requests and limits (checked by a CEL rule on the CRD), and min/max replicas plus a target CPU utilization that become an HPA.
-- **Health probes:** every App gets a readiness probe, a TCP connect on its port, so a pod whose process isn't listening is never counted as available. With `healthCheck.path` (for example `/healthz`, must start with `/`) readiness becomes an HTTP request on that path and a liveness probe is added, so a hung process gets restarted. There is no default liveness probe, because a wrong guess would restart healthy apps.
+- **Per-App spec:** image, port, optional `healthCheck` (`path`, `livenessPath`), optional env vars, required CPU/memory requests and limits (checked by a CEL rule on the CRD), and min/max replicas plus a target CPU utilization that become an HPA. The CRD rejects bad Apps up front, see [Validation](#validation).
+- **Health probes:** every App gets a readiness probe, a TCP connect on its port, so a pod whose process isn't listening is never counted as available. With `healthCheck.path` (for example `/healthz`, must start with `/`) readiness becomes an HTTP request on that path. It may check dependencies such as a database: a failing readiness probe only takes the pod out of the Service. Liveness is a separate, optional `healthCheck.livenessPath` (for example `/livez`) and is never derived from `path`, because a failing liveness probe restarts the container, and a liveness check that depends on a database would restart every pod at once during a database outage. There is no default liveness probe, because a wrong guess would restart healthy apps.
 - **Public URL and TLS status:** `status.url` holds the address the App is served on, and the `CertificateReady` condition follows the cert-manager Certificate for it (`True` once issued, `False` with cert-manager's own reason while pending, `Unknown` if cert-manager isn't installed).
 - **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available and, if cert-manager is installed, the TLS certificate is issued. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving, and while the certificate is pending.
+- **Events:** each App gets Kubernetes Events when its `Ready` or `Reconciled` condition changes and when its certificate is issued, so `kubectl describe app <name>` shows the history (rollout in progress, certificate pending, ready, failures). Events are sent on changes only, not on every reconcile pass.
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `domain.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
 
@@ -211,7 +212,7 @@ No `-k`, no warnings - a real Let's Encrypt cert, same as before, now provisione
 kubectl get app -w
 ```
 
-The columns show the image, the public URL, the two conditions, the reason for `Ready`, and the TLS status (the `CertificateReady` condition). For example, an App whose image can't be pulled stays `Reconciled=True` (the API calls worked) but `Ready=False`:
+The default columns are `Ready`, the reason for `Ready`, and the age. `kubectl get app -o wide` adds the image, the public URL, `Reconciled`, and the TLS status (the `CertificateReady` condition). For example, an App whose image can't be pulled stays `Reconciled=True` (the API calls worked) but `Ready=False`:
 
 | Ready | Reason | Meaning |
 |---|---|---|
@@ -222,7 +223,7 @@ The columns show the image, the public URL, the two conditions, the reason for `
 | `False` | `ProgressDeadlineExceeded` | The rollout made no progress within the Deployment's deadline |
 | `False` | `ReconcileError` | The last reconcile pass failed, see the `Reconciled` condition |
 
-The TLS column and `kubectl describe app` show the certificate state:
+The TLS column (`-o wide`) and `kubectl describe app` show the certificate state:
 
 | CertificateReady | Reason | Meaning |
 |---|---|---|
@@ -233,6 +234,32 @@ The TLS column and `kubectl describe app` show the certificate state:
 | `Unknown` | `CertificateCheckFailed` | The operator could not read the Certificate, see the message |
 
 An App whose certificate isn't issued yet is checked again every 10 seconds.
+
+`kubectl describe app <name>` also lists the Events, for example:
+
+```
+Events:
+  Type    Reason                 Age   From            Message
+  Normal  ReconcileSucceeded     40s   app-controller  Deployment, Service, Ingress and HorizontalPodAutoscaler are up to date
+  Normal  DeploymentUnavailable  40s   app-controller  Deployment does not have minimum availability.
+  Normal  CertificateNotReady    36s   app-controller  TLS certificate is not issued yet: ...
+  Normal  CertificateIssued      14s   app-controller  Certificate is up to date and has not expired
+  Normal  DeploymentAvailable    14s   app-controller  Deployment is fully rolled out and available
+```
+
+### Validation
+
+The CRD rejects an invalid App when you apply it, so mistakes show up as an error instead of a broken deployment:
+
+| Field | Rule |
+|---|---|
+| `metadata.name` | A DNS label: lowercase letters, digits and `-`, starts with a letter, at most 63 characters (it becomes the Service name and the hostname) |
+| `spec.image` | Required, no whitespace, at most 255 characters |
+| `spec.port` | 1-65535 |
+| `spec.minReplicas`, `spec.maxReplicas` | At least 1 (a HorizontalPodAutoscaler cannot scale to zero), and `maxReplicas >= minReplicas` |
+| `spec.targetCPUUtilizationPercentage` | 1-100 |
+| `spec.resources` | CPU and memory requests and limits set, limits not below requests |
+| `spec.healthCheck.path`, `.livenessPath` | Start with `/`, no whitespace |
 
 ### Releasing the operator image
 
@@ -282,3 +309,4 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 10. [Day 10](https://lnkd.in/p/eUdMdwjq)
 11. [Day 11](https://lnkd.in/p/emPCUxhH)
 12. [Day 12](https://lnkd.in/p/dFq4ZuKn)
+13. [Day 13](https://lnkd.in/p/dFyjVT_f)

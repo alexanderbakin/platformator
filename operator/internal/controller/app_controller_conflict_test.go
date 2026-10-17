@@ -40,7 +40,7 @@ import (
 var _ = Describe("App Controller conflict handling", func() {
 	It("requeues quietly on an update conflict and keeps the existing conditions", func() {
 		ctx := context.Background()
-		key := types.NamespacedName{Name: "conflict-app", Namespace: "default"}
+		key := types.NamespacedName{Name: "conflict-app", Namespace: testNamespace}
 
 		app := &platformatorv1alpha1.App{
 			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
