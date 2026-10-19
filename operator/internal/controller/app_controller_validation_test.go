@@ -33,6 +33,9 @@ import (
 // nameRuleMessage is the start of the CRD's message for the name rule.
 const nameRuleMessage = "name must be a DNS label"
 
+// envFromRuleMessage is the CRD's message for the envFrom rule.
+const envFromRuleMessage = "each envFrom entry must set exactly one of configMapRef and secretRef"
+
 // validApp builds an App that passes every validation rule of the CRD.
 func validApp(name string) *platformatorv1alpha1.App {
 	return &platformatorv1alpha1.App{
@@ -120,5 +123,28 @@ var _ = Describe("App validation", func() {
 		expectRejected(validApp("1app"), nameRuleMessage)
 		// 64 characters: valid for an object, too long for a DNS label.
 		expectRejected(validApp(strings.Repeat("a", 64)), nameRuleMessage)
+	})
+
+	It("accepts envFrom entries that reference a Secret or a ConfigMap", func() {
+		app := validApp("env-from-ok")
+		app.Spec.EnvFrom = []corev1.EnvFromSource{
+			{SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "db"}}},
+			{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: testConfigMap}}},
+		}
+		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, app)).To(Succeed())
+	})
+
+	It("rejects an envFrom entry that references nothing, or both a Secret and a ConfigMap", func() {
+		app := validApp("env-from-empty")
+		app.Spec.EnvFrom = []corev1.EnvFromSource{{Prefix: "DB_"}}
+		expectRejected(app, envFromRuleMessage)
+
+		app = validApp("env-from-both")
+		app.Spec.EnvFrom = []corev1.EnvFromSource{{
+			SecretRef:    &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "db"}},
+			ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: testConfigMap}},
+		}}
+		expectRejected(app, envFromRuleMessage)
 	})
 })

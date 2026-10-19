@@ -494,6 +494,48 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(status).To(Equal("False"))
 			}).WithTimeout(10 * time.Second).WithPolling(2 * time.Second).Should(Succeed())
 		})
+
+		It("should wait for a Secret referenced by envFrom, and start once it exists", func() {
+			const (
+				name       = "e2e-env-from"
+				secretName = "e2e-env-from-secret"
+			)
+
+			By("creating a self-signed ClusterIssuer so the App's certificate can be issued")
+			ensureSelfSignedIssuer()
+
+			By("creating an App that reads its environment from a Secret that does not exist yet")
+			applyAppManifest(name, appManifest(name, "traefik/whoami:latest")+
+				"  envFrom:\n    - secretRef:\n        name: "+secretName+"\n")
+
+			By("waiting until the pod is stuck because the Secret is missing")
+			Eventually(func(g Gomega) {
+				reasons, err := podWaitingReasons(name)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(reasons).To(ContainSubstring("CreateContainerConfigError"))
+			}).Should(Succeed())
+			status, err := appConditionField(name, "Ready", "status")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("False"))
+
+			By("creating the Secret")
+			cmd := exec.Command("kubectl", "create", "secret", "generic", secretName,
+				"-n", appNamespace, "--from-literal=WHOAMI_NAME=from-secret")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the Secret")
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "secret", secretName,
+					"-n", appNamespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("waiting for the App to become Ready once the pod can start")
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).WithTimeout(4 * time.Minute).Should(Succeed())
+		})
 	})
 })
 
@@ -592,8 +634,14 @@ func applyApp(name, image string) {
 
 // applyAppOnPort is applyApp with a custom port.
 func applyAppOnPort(name, image string, port int) {
+	applyAppManifest(name, appManifestOnPort(name, image, port))
+}
+
+// applyAppManifest applies the given App manifest and registers the App's
+// deletion for the end of the current spec.
+func applyAppManifest(name, manifest string) {
 	cmd := exec.Command("kubectl", "apply", "-f", "-")
-	cmd.Stdin = strings.NewReader(appManifestOnPort(name, image, port))
+	cmd.Stdin = strings.NewReader(manifest)
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "Failed to apply App %s", name)
 

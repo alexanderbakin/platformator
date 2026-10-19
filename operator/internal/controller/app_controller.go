@@ -139,11 +139,11 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			ready.Message = "Reconcile failed, see the Reconciled condition"
 		case avail == nil:
 			ready.Status = metav1.ConditionFalse
-			ready.Reason = "DeploymentUnavailable"
+			ready.Reason = reasonDeploymentUnavailable
 			ready.Message = "Deployment has not reported an Available condition yet"
 		case avail.Status != corev1.ConditionTrue:
 			ready.Status = metav1.ConditionFalse
-			ready.Reason = "DeploymentUnavailable"
+			ready.Reason = reasonDeploymentUnavailable
 			ready.Message = avail.Message
 		case progressing != nil && progressing.Status == corev1.ConditionFalse &&
 			progressing.Reason == progressDeadlineExceeded:
@@ -154,7 +154,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			ready.Message = progressing.Message
 		case !rolledOut:
 			ready.Status = metav1.ConditionFalse
-			ready.Reason = "RolloutInProgress"
+			ready.Reason = reasonRolloutInProgress
 			ready.Message = rolloutMessage
 		case certCond != nil && certCond.Status == metav1.ConditionFalse:
 			// The pods are fine, but the App's HTTPS address would still show a
@@ -171,9 +171,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		if certCond != nil {
 			meta.SetStatusCondition(&app.Status.Conditions, *certCond)
 			// Certificate changes are not watched (the CRD may not even be
-			// installed), so poll until cert-manager reports it issued.
-			if err == nil && certCond.Status == metav1.ConditionFalse && result.RequeueAfter == 0 {
-				result = ctrl.Result{RequeueAfter: certificatePollInterval}
+			// installed), so look again later: soon while it is not issued, and
+			// slowly afterwards, to notice a renewal that fails.
+			if after := certificateRequeueAfter(certCond); err == nil && after > 0 && result.RequeueAfter == 0 {
+				result = ctrl.Result{RequeueAfter: after}
 			}
 		}
 
@@ -247,6 +248,7 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 					Ports:     []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
 					Resources: app.Spec.Resources,
 					Env:       app.Spec.Env,
+					EnvFrom:   app.Spec.EnvFrom,
 
 					ReadinessProbe: readiness,
 					LivenessProbe:  liveness,
@@ -473,7 +475,33 @@ const (
 	// certificatePollInterval is how often an App whose certificate is not
 	// issued yet is checked again.
 	certificatePollInterval = 10 * time.Second
+
+	// certificateRecheckInterval is how often an App whose certificate is fine
+	// is checked again, so a renewal that fails is noticed. Nothing watches the
+	// Certificate (its CRD may not be installed), so this is a slow poll.
+	certificateRecheckInterval = 10 * time.Minute
 )
+
+// Reasons of the Ready condition.
+const (
+	reasonDeploymentUnavailable = "DeploymentUnavailable"
+	reasonRolloutInProgress     = "RolloutInProgress"
+)
+
+// certificateRequeueAfter says when to look at the App's certificate again. It
+// is soon while the certificate is not issued or could not be read, and later
+// otherwise: it keeps running after issuance to notice a failed renewal, and
+// to notice cert-manager being installed after the App.
+func certificateRequeueAfter(cond *metav1.Condition) time.Duration {
+	switch {
+	case cond == nil:
+		return 0
+	case cond.Status == metav1.ConditionFalse, cond.Reason == reasonCertificateCheckFailed:
+		return certificatePollInterval
+	default:
+		return certificateRecheckInterval
+	}
+}
 
 // certificateGVK is cert-manager's Certificate. It is read as unstructured so
 // the operator needs neither cert-manager's Go module nor its CRDs to be

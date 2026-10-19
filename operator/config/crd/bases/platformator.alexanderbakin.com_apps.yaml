@@ -223,6 +223,64 @@ spec:
                   - name
                   type: object
                 type: array
+              envFrom:
+                description: |-
+                  envFrom exposes every key of the referenced Secrets and ConfigMaps as
+                  environment variables. Use it for configuration and credentials instead of
+                  writing values into env. The referenced objects must exist in the App's
+                  namespace: until they do the pods cannot start and the App is not Ready.
+                  Pods read them when they start, so after changing a Secret or ConfigMap,
+                  delete the pods to pick up the new values.
+                items:
+                  description: EnvFromSource represents the source of a set of ConfigMaps
+                    or Secrets
+                  properties:
+                    configMapRef:
+                      description: The ConfigMap to select from
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the ConfigMap must be defined
+                          type: boolean
+                      type: object
+                      x-kubernetes-map-type: atomic
+                    prefix:
+                      description: |-
+                        Optional text to prepend to the name of each environment variable.
+                        May consist of any printable ASCII characters except '='.
+                      type: string
+                    secretRef:
+                      description: The Secret to select from
+                      properties:
+                        name:
+                          default: ""
+                          description: |-
+                            Name of the referent.
+                            This field is effectively required, but due to backwards compatibility is
+                            allowed to be empty. Instances of this type with an empty value here are
+                            almost certainly wrong.
+                            More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                          type: string
+                        optional:
+                          description: Specify whether the Secret must be defined
+                          type: boolean
+                      type: object
+                      x-kubernetes-map-type: atomic
+                  type: object
+                maxItems: 20
+                type: array
+                x-kubernetes-validations:
+                - message: each envFrom entry must set exactly one of configMapRef
+                    and secretRef
+                  rule: self.all(e, has(e.configMapRef) != has(e.secretRef))
               healthCheck:
                 description: |-
                   healthCheck switches readiness from a TCP connect on the port to an HTTP

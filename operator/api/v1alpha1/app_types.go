@@ -62,6 +62,17 @@ type AppSpec struct {
 	// +optional
 	Env []corev1.EnvVar `json:"env"`
 
+	// envFrom exposes every key of the referenced Secrets and ConfigMaps as
+	// environment variables. Use it for configuration and credentials instead of
+	// writing values into env. The referenced objects must exist in the App's
+	// namespace: until they do the pods cannot start and the App is not Ready.
+	// Pods read them when they start, so after changing a Secret or ConfigMap,
+	// delete the pods to pick up the new values.
+	// +optional
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:XValidation:rule="self.all(e, has(e.configMapRef) != has(e.secretRef))",message="each envFrom entry must set exactly one of configMapRef and secretRef"
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="('cpu' in self.limits && 'cpu' in self.requests && 'memory' in self.limits && 'memory' in self.requests) && !quantity(self.limits['cpu']).isLessThan(quantity(self.requests['cpu'])) && !quantity(self.limits['memory']).isLessThan(quantity(self.requests['memory']))",message="CPU and memory limits/requests must be set and limits must be greater than or equal to requests"
 	Resources corev1.ResourceRequirements `json:"resources"`

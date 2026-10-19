@@ -55,6 +55,8 @@ const (
 	testNamespace = "default"
 	// testImage is the container image of the test Apps.
 	testImage = "nginx:latest"
+	// testConfigMap is the name of a ConfigMap the test Apps refer to.
+	testConfigMap = "settings"
 )
 
 func TestControllers(t *testing.T) {

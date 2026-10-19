@@ -84,3 +84,34 @@ var _ = Describe("Certificate readiness", func() {
 		Expect(got.Message).NotTo(BeEmpty())
 	})
 })
+
+var _ = Describe("Certificate recheck", func() {
+	// cond builds a CertificateReady condition with the given status and reason.
+	cond := func(status metav1.ConditionStatus, reason string) *metav1.Condition {
+		return &metav1.Condition{Type: conditionCertificateReady, Status: status, Reason: reason}
+	}
+
+	It("looks again soon while the certificate is not issued", func() {
+		Expect(certificateRequeueAfter(cond(metav1.ConditionFalse, reasonCertificatePending))).
+			To(Equal(certificatePollInterval))
+	})
+
+	It("looks again soon when the certificate could not be read", func() {
+		Expect(certificateRequeueAfter(cond(metav1.ConditionUnknown, reasonCertificateCheckFailed))).
+			To(Equal(certificatePollInterval))
+	})
+
+	It("keeps checking slowly after the certificate was issued, to notice a failed renewal", func() {
+		Expect(certificateRequeueAfter(cond(metav1.ConditionTrue, reasonCertificateIssued))).
+			To(Equal(certificateRecheckInterval))
+	})
+
+	It("keeps checking slowly when cert-manager is not installed, in case it is installed later", func() {
+		Expect(certificateRequeueAfter(cond(metav1.ConditionUnknown, reasonCertManagerNotInstalled))).
+			To(Equal(certificateRecheckInterval))
+	})
+
+	It("does nothing when the certificate was not looked at in this pass", func() {
+		Expect(certificateRequeueAfter(nil)).To(BeZero())
+	})
+})

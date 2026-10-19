@@ -4,13 +4,13 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 13 of 30.
+Day 15 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
 What the operator does today:
 
-- **Per-App spec:** image, port, optional `healthCheck` (`path`, `livenessPath`), optional env vars, required CPU/memory requests and limits (checked by a CEL rule on the CRD), and min/max replicas plus a target CPU utilization that become an HPA. The CRD rejects bad Apps up front, see [Validation](#validation).
+- **Per-App spec:** image, port, optional `healthCheck` (`path`, `livenessPath`), optional `env` and `envFrom` (Secrets and ConfigMaps), required CPU/memory requests and limits (checked by a CEL rule on the CRD), and min/max replicas plus a target CPU utilization that become an HPA. The CRD rejects bad Apps up front, see [Validation](#validation).
 - **Health probes:** every App gets a readiness probe, a TCP connect on its port, so a pod whose process isn't listening is never counted as available. With `healthCheck.path` (for example `/healthz`, must start with `/`) readiness becomes an HTTP request on that path. It may check dependencies such as a database: a failing readiness probe only takes the pod out of the Service. Liveness is a separate, optional `healthCheck.livenessPath` (for example `/livez`) and is never derived from `path`, because a failing liveness probe restarts the container, and a liveness check that depends on a database would restart every pod at once during a database outage. There is no default liveness probe, because a wrong guess would restart healthy apps.
 - **Public URL and TLS status:** `status.url` holds the address the App is served on, and the `CertificateReady` condition follows the cert-manager Certificate for it (`True` once issued, `False` with cert-manager's own reason while pending, `Unknown` if cert-manager isn't installed).
 - **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available and, if cert-manager is installed, the TLS certificate is issued. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving, and while the certificate is pending.
@@ -233,7 +233,7 @@ The TLS column (`-o wide`) and `kubectl describe app` show the certificate state
 | `Unknown` | `CertManagerNotInstalled` | The Certificate CRD isn't installed, so there is nothing to check |
 | `Unknown` | `CertificateCheckFailed` | The operator could not read the Certificate, see the message |
 
-An App whose certificate isn't issued yet is checked again every 10 seconds.
+An App whose certificate isn't issued yet is checked again every 10 seconds, and one whose certificate is fine every 10 minutes, so a renewal that fails turns `Ready` False again.
 
 `kubectl describe app <name>` also lists the Events, for example:
 
@@ -247,6 +247,29 @@ Events:
   Normal  DeploymentAvailable    14s   app-controller  Deployment is fully rolled out and available
 ```
 
+### Configuration and Secrets
+
+Put configuration in `env`, and credentials in a Secret that `envFrom` (or an `env` entry with `valueFrom`) points to, so they stay out of the App manifest:
+
+```yaml
+spec:
+  envFrom:
+    - secretRef:
+        name: db-credentials
+    - configMapRef:
+        name: settings
+```
+
+Every key of the Secret or ConfigMap becomes an environment variable. Each entry sets exactly one of `secretRef` and `configMapRef`. The objects must exist in the App's namespace: until they do, the pod cannot start (`CreateContainerConfigError`) and the App stays not Ready, then it starts by itself once they exist. The operator never reads the Secret, only the pod does.
+
+Pods read these values when they start. After changing a Secret or ConfigMap, delete the pods (`kubectl delete pod -l app=<name>`) so the new ones pick up the change.
+
+### Rolling back
+
+The operator never changes your `spec`, so a rollback is a change you make where the App is defined. If the App manifest lives in Git (with Argo CD, Flux or a CI job applying it), revert the commit that changed the image and let your tooling apply it. That keeps Git the source of truth and leaves a record of the rollback. Without Git in the loop, set `spec.image` back to the previous image with `kubectl patch`.
+
+The operator does not roll back by itself: it would write to `spec`, which Git-managed tooling would change back.
+
 ### Validation
 
 The CRD rejects an invalid App when you apply it, so mistakes show up as an error instead of a broken deployment:
@@ -258,6 +281,7 @@ The CRD rejects an invalid App when you apply it, so mistakes show up as an erro
 | `spec.port` | 1-65535 |
 | `spec.minReplicas`, `spec.maxReplicas` | At least 1 (a HorizontalPodAutoscaler cannot scale to zero), and `maxReplicas >= minReplicas` |
 | `spec.targetCPUUtilizationPercentage` | 1-100 |
+| `spec.envFrom` | At most 20 entries, each with exactly one of `secretRef` and `configMapRef` |
 | `spec.resources` | CPU and memory requests and limits set, limits not below requests |
 | `spec.healthCheck.path`, `.livenessPath` | Start with `/`, no whitespace |
 
@@ -266,10 +290,10 @@ The CRD rejects an invalid App when you apply it, so mistakes show up as an erro
 Day to day, nothing needs tagging:
 
 1. Commit and push to `main`.
-2. CI runs lint, unit tests and e2e, and publishes `<latest version tag>-build.<run number>` (for example `v0.6.0-build.42`). The run summary prints the deploy command.
+2. CI runs lint, unit tests and e2e, and only if all three pass it publishes `<latest version tag>-build.<run number>` (for example `v0.6.0-build.42`). The run summary prints the deploy command. No image appears for a commit whose checks fail.
 3. Deploy it: `make deploy-image IMG=ghcr.io/<you>/platformator-operator:v0.6.0-build.42`.
 
-To cut a clean version, tag a commit on `main` after its checks are green, so a version number never points at an untested commit:
+To cut a clean version, tag a commit on `main`. The tag runs the same checks before publishing, so a version never points at code that was not tested:
 
 ```bash
 git tag v0.7.0
@@ -310,3 +334,4 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 11. [Day 11](https://lnkd.in/p/emPCUxhH)
 12. [Day 12](https://lnkd.in/p/dFq4ZuKn)
 13. [Day 13](https://lnkd.in/p/dFyjVT_f)
+14. [Day 14](https://lnkd.in/p/dfXV5UEX)
