@@ -8,7 +8,7 @@ on:
       - "v*"
     paths:
       - "operator/**"
-      - ".github/workflows/publish-image.yml"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions: {}
@@ -18,8 +18,30 @@ env:
   PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
+  # An image is published only if lint, unit tests and e2e pass on the same
+  # commit. This includes release tags, so a version never points at code that
+  # was not tested.
+  lint:
+    name: Lint
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint.yml
+
+  test:
+    name: Tests
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test.yml
+
+  e2e:
+    name: E2E
+    permissions:
+      contents: read
+    uses: ./.github/workflows/test-e2e.yml
+
   publish:
     name: Build and push to GHCR
+    needs: [lint, test, e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: read

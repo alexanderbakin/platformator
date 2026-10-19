@@ -1,7 +1,13 @@
 name: E2E Tests
 
 on:
+  # Pushes to main and release tags run these checks through the "Publish
+  # image" workflow, which publishes only if they pass.
   push:
+    branches-ignore:
+      - main
+    tags-ignore:
+      - "**"
     paths:
       - "operator/**"
       - ".github/workflows/**"
@@ -9,6 +15,7 @@ on:
     paths:
       - "operator/**"
       - ".github/workflows/**"
+  workflow_call:
 
 permissions: {}
 
