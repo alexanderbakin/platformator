@@ -1,0 +1,14 @@
+- op: add
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: DOMAIN
+      valueFrom:
+        configMapKeyRef:
+          name: operator-config
+          key: DOMAIN
+    - name: REGISTRY
+      valueFrom:
+        configMapKeyRef:
+          name: operator-config
+          key: REGISTRY
+          optional: true

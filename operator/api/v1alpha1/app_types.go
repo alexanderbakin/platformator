@@ -22,14 +22,23 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+// +kubebuilder:validation:XValidation:rule="has(self.image) != has(self.source)",message="set exactly one of image and source"
 // +kubebuilder:validation:XValidation:rule="!has(self.minReplicas) || !has(self.maxReplicas) || self.maxReplicas >= self.minReplicas",message="maxReplicas must be greater than or equal to minReplicas"
 type AppSpec struct {
-	// image is the container image to run, for example "nginx:1.27".
-	// +kubebuilder:validation:Required
+	// image is a ready-made container image to run, for example "nginx:1.27".
+	// Set either image or source.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=255
 	// +kubebuilder:validation:Pattern=`^\S+$`
-	Image string `json:"image"`
+	Image string `json:"image,omitempty"`
+
+	// source builds the image from a Git repository instead of using a
+	// ready-made one. The operator builds the repository's Dockerfile in the
+	// cluster whenever the branch has a new commit, and runs the result. Set
+	// either image or source.
+	// +optional
+	Source *Source `json:"source,omitempty"`
 
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
@@ -78,6 +87,64 @@ type AppSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources"`
 }
 
+// Source says where the code of an App comes from.
+type Source struct {
+	// git is the repository to build.
+	// +kubebuilder:validation:Required
+	Git GitSource `json:"git"`
+}
+
+// GitSource is a Git repository with a Dockerfile.
+type GitSource struct {
+	// url is the HTTPS address of a public repository, for example
+	// "https://github.com/owner/repo".
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^https://\S+$`
+	URL string `json:"url"`
+
+	// branch is the branch to follow. A new commit on it triggers a new build.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._/-]+$`
+	Branch string `json:"branch,omitempty"`
+
+	// path is the directory inside the repository that holds the Dockerfile and
+	// the files it uses, for example "services/api". It defaults to the root.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._/-]+$`
+	Path string `json:"path,omitempty"`
+
+	// dockerfile is the name of the Dockerfile inside path.
+	// +optional
+	// +kubebuilder:default=Dockerfile
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9._-]+$`
+	Dockerfile string `json:"dockerfile,omitempty"`
+}
+
+// BuildStatus is the state of the builds of an App that has spec.source.
+type BuildStatus struct {
+	// commit is the commit of the most recent build, whether it worked or not.
+	// +optional
+	Commit string `json:"commit,omitempty"`
+
+	// state is Running, Succeeded or Failed, for the build of commit.
+	// +optional
+	State string `json:"state,omitempty"`
+
+	// jobName is the Job that builds commit. Its logs show the build output.
+	// +optional
+	JobName string `json:"jobName,omitempty"`
+
+	// message explains a failed build.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// image is the image of the last build that succeeded, the one the App
+	// runs. It stays in place while a newer commit builds or fails to build.
+	// +optional
+	Image string `json:"image,omitempty"`
+}
+
 // HealthCheck configures the HTTP probes of an App.
 type HealthCheck struct {
 	// path is the HTTP path that answers with a 2xx or 3xx status while the app
@@ -104,6 +171,10 @@ type AppStatus struct {
 	// url is the public address of the App, set once its Ingress exists.
 	// +optional
 	URL string `json:"url,omitempty"`
+
+	// build is the state of the builds, for an App that has spec.source.
+	// +optional
+	Build *BuildStatus `json:"build,omitempty"`
 
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -135,6 +206,7 @@ type AppStatus struct {
 // +kubebuilder:printcolumn:name="URL",type=string,priority=1,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Reconciled",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`
 // +kubebuilder:printcolumn:name="TLS",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="CertificateReady")].status`
+// +kubebuilder:printcolumn:name="Commit",type=string,priority=1,JSONPath=`.status.build.commit`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name) <= 63",message="name must be a DNS label (lowercase letters, digits and dashes, starting with a letter, at most 63 characters) because it becomes the Service name and the hostname"
 
 // App is the Schema for the apps API

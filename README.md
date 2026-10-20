@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 15 of 30.
+Day 16 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -15,16 +15,76 @@ What the operator does today:
 - **Public URL and TLS status:** `status.url` holds the address the App is served on, and the `CertificateReady` condition follows the cert-manager Certificate for it (`True` once issued, `False` with cert-manager's own reason while pending, `Unknown` if cert-manager isn't installed).
 - **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available and, if cert-manager is installed, the TLS certificate is issued. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving, and while the certificate is pending.
 - **Events:** each App gets Kubernetes Events when its `Ready` or `Reconciled` condition changes and when its certificate is issued, so `kubectl describe app <name>` shows the history (rollout in progress, certificate pending, ready, failures). Events are sent on changes only, not on every reconcile pass.
-- **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `domain.env` through a Kustomize-generated ConfigMap, so it never lands in git.
+- **Builds from Git:** instead of an `image`, an App can name a public repository. The operator watches the branch, builds the Dockerfile in the cluster with BuildKit, pushes to GHCR and rolls the Deployment to the new image. See [Building from Git](#building-from-git).
+- **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `operator.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
 
 ## Architecture
 
-WIP.
+Three layers, each built by a different tool:
+
+```
+Terraform  ->  AWS: EC2 instance, Route53 zone for the subdomain, state bucket
+Ansible    ->  the node: k3s (with Traefik), cert-manager, a Let's Encrypt ClusterIssuer
+operator   ->  the platform: an App CRD and a controller that runs inside k3s
+```
+
+**The operator** is a Kubebuilder (Go) controller. A user applies one `App` object; the controller turns it into everything needed to serve it:
+
+```
+                         +--------------------+
+  kubectl apply App ---> |  App (CRD)         |
+                         +---------+----------+
+                                   | reconcile
+        +------------+-------------+--------------+----------------+
+        v            v             v              v                v
+   Deployment     Service       Ingress          HPA        build Job (BuildKit)
+   (probes,       (port)     (host, TLS via     (min/max,    only with spec.source
+    env, image)               cert-manager)      CPU target)
+```
+
+Each pass of the controller, in order:
+
+1. **Build** (only with `spec.source`): read the branch head from the Git server, start a BuildKit Job for a commit that has none, and pick the image of the newest successful build.
+2. **Deployment, Service, Ingress, HPA:** create or update each one so it matches the spec, owned by the App so deleting the App removes them.
+3. **Status:** read the Deployment, the build and the cert-manager Certificate, and write the `Reconciled`, `Ready`, `CertificateReady` and `Built` conditions, plus `status.url` and `status.build`. Events are sent only when a condition changes.
+
+Things worth knowing about how it behaves:
+
+- **The controller never edits `spec`.** It only writes `status`. What you applied is what you get, which is why a rollback is a Git revert and not an operator feature.
+- **Watched vs polled.** Deployments, Services, Ingresses, HPAs and build Jobs are watched through ownership. Certificates and Git branches are polled (10 seconds while pending, then minutes), because the cert-manager CRD may not be installed and Git has no event stream without a webhook.
+- **cert-manager is optional.** The Certificate is read as unstructured, so without cert-manager `CertificateReady` is just `Unknown` and does not block `Ready`.
+- **Failures stay local.** A conflict is retried quietly, an unreachable Git host keeps the last good image running, and a failed build never replaces it.
+- **Config comes from the environment.** Base domain, registry and the BuildKit image are flags with env fallbacks, fed by a gitignored `operator.env` through a Kustomize ConfigMap.
+
 
 ## Design Decisions
 
-WIP.
+Each entry says what was chosen, why, and what it costs.
+
+**An operator with one CRD, not a Helm chart or a script.** An `App` is a single object that the cluster keeps true, instead of a template rendered once. The controller fixes drift, reports status and reacts to changes. Cost: more code to own than a chart, and a CRD to keep compatible.
+
+**The operator only writes `status`, never `spec`.** It never changes what you applied. A rollback is a Git revert, which keeps Git the source of truth. A `lastReadyImage` field was built and removed for this reason: a second place that remembers an image would disagree with Git. Cost: no one-command rollback inside the platform.
+
+**`Ready` is strict.** It is False while a rollout is in progress or stuck and while the certificate is pending, even if old pods still serve. Available=True alone hides crashlooping new pods during a rolling update. Cost: `Ready` flaps during every deploy. A separate `Progressing` condition was considered and dropped as extra surface for little gain.
+
+**Validation lives in the CRD (CEL), not in a webhook.** Rules like "resources are required" and "set exactly one of image and source" run in the API server, so they work in envtest and need no webhook server or certificate. Cost: CEL is less expressive than Go, and cannot check things outside the object.
+
+**Readiness by default, liveness only when asked.** Every App gets a TCP readiness probe so Ready means something. Liveness is opt-in and never reuses the readiness path: a readiness path may check a database, and a failing liveness probe restarts the container, so sharing them would restart every pod during a database outage. Cost: apps that need liveness must say so.
+
+**Events on change only.** Events are sent when a condition's status or reason changes, and only after the status update succeeded. `kubectl describe app` shows a history, not a repeat of every pass.
+
+**Poll what cannot be watched.** Certificates are read as unstructured and polled, so the operator needs neither cert-manager's Go module nor its CRD. Git branches are polled once a minute over plain HTTPS. Cost: a certificate or commit change can take up to the poll interval to show.
+
+**Builds run as BuildKit Jobs in the cluster.** The operator does not build anything itself, and it needs no Docker daemon: a Job runs rootless BuildKit against the repository at an exact commit and pushes to GHCR. The Deployment moves only when a build succeeded, so a broken commit never takes the App down. A failed commit is not retried. Cost: the node must allow the rootless profile (seccomp and AppArmor unconfined), and only public repositories work for now.
+
+**Registry credentials are a personal access token in a Secret.** The build Job and the Deployment use a classic PAT from a `registry-credentials` Secret. GitHub can't scope a classic token below `repo` when it has `write:packages`, and fine-grained tokens don't reach GHCR, so the token can read and write private repositories. That is acceptable for a one-person demo cluster. A real setup would use a machine account that owns no repositories, or build in CI with the per-run `GITHUB_TOKEN`.
+
+**Polling Git instead of webhooks.** A webhook needs a public endpoint on the operator, a secret and per-provider setup. Polling works with any HTTPS Git host and nothing exposed. Cost: up to a minute of delay and one request per App per minute.
+
+**One node, on purpose.** The target is a single k3s node on AWS: cheap, easy to rebuild from Terraform and Ansible, and enough to show the platform. Cost: no high availability. The operator itself would not need to change to run on more nodes.
+
+**CI gates the image.** The operator image is published only after lint, unit tests and e2e on kind pass, so what lands on GHCR has been tested.
 
 ## Getting started
 
@@ -175,7 +235,7 @@ make run
 Or run it in the cluster. The base domain goes in a gitignored file that Kustomize turns into a ConfigMap:
 
 ```bash
-cp config/default/domain.env.example config/default/domain.env   # then set DOMAIN=<your domain>
+cp config/default/operator.env.example config/default/operator.env   # then set DOMAIN=<your domain>
 
 make deploy-image IMG=ghcr.io/<you>/platformator-operator:v0.6.0-build.42
 ```
@@ -264,6 +324,41 @@ Every key of the Secret or ConfigMap becomes an environment variable. Each entry
 
 Pods read these values when they start. After changing a Secret or ConfigMap, delete the pods (`kubectl delete pod -l app=<name>`) so the new ones pick up the change.
 
+### Building from Git
+
+Instead of a ready-made `image`, an App can name a Git repository (set exactly one of the two):
+
+```yaml
+spec:
+  source:
+    git:
+      url: https://github.com/alexanderbakin/platformator   # public, HTTPS
+      branch: main                                          # default
+      path: examples/hello                                  # directory with the Dockerfile, default: root
+      dockerfile: Dockerfile                                # default
+  port: 80
+```
+
+How it works:
+
+- The operator asks the Git server for the head of the branch once a minute (plain HTTPS, no `git` binary, no webhook to expose).
+- For a commit it has not built yet, it starts a rootless [BuildKit](https://github.com/moby/buildkit) Job that builds the Dockerfile and pushes `<REGISTRY>/<namespace>-<name>:<commit>`.
+- When the Job succeeds, the Deployment moves to that image. While a build runs or fails, the previous image keeps running, so a broken commit never takes the App down. A failed commit is not retried; push a new one.
+- `kubectl get app -o wide` shows the built `COMMIT`, the `Built` condition has the state, and `status.build.jobName` points at the Job whose logs hold the build output.
+
+Setup, once:
+
+```sh
+# 1. Where images go: add to config/default/operator.env (not committed)
+REGISTRY=ghcr.io/<your-github-name>
+
+# 2. Credentials to push and pull (a token with write:packages), in each App's namespace
+kubectl create secret docker-registry registry-credentials \
+  --docker-server=ghcr.io --docker-username=<your-github-name> --docker-password=<token>
+```
+
+Limits for now: public repositories only, one Dockerfile build per commit, and the BuildKit Job runs rootless with seccomp and AppArmor unconfined, which the node must allow.
+
 ### Rolling back
 
 The operator never changes your `spec`, so a rollback is a change you make where the App is defined. If the App manifest lives in Git (with Argo CD, Flux or a CI job applying it), revert the commit that changed the image and let your tooling apply it. That keeps Git the source of truth and leaves a record of the rollback. Without Git in the loop, set `spec.image` back to the previous image with `kubectl patch`.
@@ -317,7 +412,7 @@ make lint
 make test-e2e   # needs Docker: creates a kind cluster, runs the real operator in it, deletes it
 ```
 
-The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `domain.env.example` into place first, since the real domain file is gitignored.
+The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `operator.env.example` into place first, since the real settings file is gitignored.
 
 ## Posts
 
@@ -335,3 +430,4 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 12. [Day 12](https://lnkd.in/p/dFq4ZuKn)
 13. [Day 13](https://lnkd.in/p/dFyjVT_f)
 14. [Day 14](https://lnkd.in/p/dfXV5UEX)
+15. [Day 15](https://lnkd.in/p/dMwxi4HZ)

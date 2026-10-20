@@ -49,8 +49,8 @@ jobs:
       - name: Verify kind installation
         run: kind version
 
-      - name: Create domain.env from the example
-        run: cp config/default/domain.env.example config/default/domain.env
+      - name: Create operator.env from the example
+        run: cp config/default/operator.env.example config/default/operator.env
 
       - name: Running Test e2e
         run: |

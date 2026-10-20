@@ -23,6 +23,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,6 +48,18 @@ type AppReconciler struct {
 	Scheme *runtime.Scheme
 	Domain string
 
+	// Registry is where images built from Git are pushed, for example
+	// "ghcr.io/alexanderbakin". RegistrySecret is the dockerconfigjson Secret,
+	// in the App's namespace, used to push to it and to pull from it.
+	Registry       string
+	RegistrySecret string
+
+	// BuilderImage is the rootless BuildKit image that runs build Jobs.
+	BuilderImage string
+
+	// Resolver finds the head commit of a branch.
+	Resolver HeadResolver
+
 	// Recorder publishes Kubernetes Events about each App, visible in
 	// `kubectl describe app`. It may be nil (tests), then no events are sent.
 	Recorder events.EventRecorder
@@ -60,6 +73,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -92,6 +106,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	// Ingress has been reconciled, so a pass that fails earlier leaves the
 	// condition from the last successful pass untouched.
 	var certCond *metav1.Condition
+
+	// build says which image to run and when to look at Git again.
+	var build buildOutcome
 
 	// This runs right before Reconcile actually returns, whichever of the
 	// return statements below fires. It records two status conditions and
@@ -137,6 +154,13 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			ready.Status = metav1.ConditionFalse
 			ready.Reason = reasonReconcileError
 			ready.Message = "Reconcile failed, see the Reconciled condition"
+		case app.Spec.Source != nil && build.image == "":
+			ready.Status = metav1.ConditionFalse
+			ready.Reason = reasonImageNotBuilt
+			ready.Message = "No image has been built from Git yet"
+			if app.Status.Build != nil && app.Status.Build.Message != "" {
+				ready.Message += ": " + app.Status.Build.Message
+			}
 		case avail == nil:
 			ready.Status = metav1.ConditionFalse
 			ready.Reason = reasonDeploymentUnavailable
@@ -168,14 +192,21 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 
 		meta.SetStatusCondition(&app.Status.Conditions, reconciled)
 		meta.SetStatusCondition(&app.Status.Conditions, ready)
+		builtCond := buildCondition(&app)
+		if builtCond != nil {
+			meta.SetStatusCondition(&app.Status.Conditions, *builtCond)
+		} else {
+			meta.RemoveStatusCondition(&app.Status.Conditions, conditionBuilt)
+		}
 		if certCond != nil {
 			meta.SetStatusCondition(&app.Status.Conditions, *certCond)
+		}
+		if err == nil {
 			// Certificate changes are not watched (the CRD may not even be
 			// installed), so look again later: soon while it is not issued, and
-			// slowly afterwards, to notice a renewal that fails.
-			if after := certificateRequeueAfter(certCond); err == nil && after > 0 && result.RequeueAfter == 0 {
-				result = ctrl.Result{RequeueAfter: after}
-			}
+			// slowly afterwards, to notice a renewal that fails. Branches are
+			// polled the same way.
+			result.RequeueAfter = soonest(result.RequeueAfter, certificateRequeueAfter(certCond), build.requeue)
 		}
 
 		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
@@ -192,10 +223,15 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			// Events are sent only after the new status is stored, so a lost
 			// update (conflict) does not announce the same change twice.
 			r.emitTransitionEvents(&app, previous, reconciled, ready, certCond)
+			r.emitBuildEvent(&app, previous, builtCond)
 		}
 	}()
 
-	if dep, err = r.reconcileDeployment(ctx, &app); err != nil {
+	if build, err = r.reconcileBuild(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling build: %w", err)
+	}
+
+	if dep, err = r.reconcileDeployment(ctx, &app, build.image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
 	}
 
@@ -222,7 +258,25 @@ func labelsFor(app *platformatorv1alpha1.App) map[string]string {
 	return map[string]string{"app": app.Name}
 }
 
-func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformatorv1alpha1.App) (*appsv1.Deployment, error) {
+// soonest returns the smallest of the positive durations, or 0 if there is none.
+func soonest(durations ...time.Duration) time.Duration {
+	var best time.Duration
+	for _, d := range durations {
+		if d > 0 && (best == 0 || d < best) {
+			best = d
+		}
+	}
+	return best
+}
+
+// reconcileDeployment makes the Deployment run image. With no image yet (the
+// first build has not finished) it leaves the Deployment alone.
+func (r *AppReconciler) reconcileDeployment(
+	ctx context.Context, app *platformatorv1alpha1.App, image string,
+) (*appsv1.Deployment, error) {
+	if image == "" {
+		return nil, nil
+	}
 
 	replicas := int32(1)
 	if app.Spec.MinReplicas != nil {
@@ -239,12 +293,19 @@ func (r *AppReconciler) reconcileDeployment(ctx context.Context, app *platformat
 			dep.Spec.Replicas = &replicas
 		}
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labelsFor(app)}
+		var pullSecrets []corev1.LocalObjectReference
+		if app.Spec.Source != nil {
+			// Images built from Git live in the registry the operator pushes to,
+			// which may be private.
+			pullSecrets = []corev1.LocalObjectReference{{Name: r.RegistrySecret}}
+		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
 			Spec: corev1.PodSpec{
+				ImagePullSecrets: pullSecrets,
 				Containers: []corev1.Container{{
 					Name:      app.Name,
-					Image:     app.Spec.Image,
+					Image:     image,
 					Ports:     []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
 					Resources: app.Spec.Resources,
 					Env:       app.Spec.Env,
@@ -591,6 +652,7 @@ const (
 	eventActionReconcile = "Reconcile"
 	eventActionRollout   = "Rollout"
 	eventActionTLS       = "TLS"
+	eventActionBuild     = "Build"
 )
 
 // emitTransitionEvents publishes an Event when the Ready or Reconciled
@@ -636,6 +698,23 @@ func (r *AppReconciler) emitTransitionEvents(
 	}
 }
 
+// emitBuildEvent publishes an Event when the Built condition changes.
+func (r *AppReconciler) emitBuildEvent(
+	app *platformatorv1alpha1.App, previous map[string]metav1.Condition, built *metav1.Condition,
+) {
+	if r.Recorder == nil || built == nil {
+		return
+	}
+	if prev, found := previous[built.Type]; found && prev.Status == built.Status && prev.Reason == built.Reason {
+		return
+	}
+	eventType := corev1.EventTypeNormal
+	if built.Status == metav1.ConditionFalse {
+		eventType = corev1.EventTypeWarning
+	}
+	r.Recorder.Eventf(app, nil, eventType, built.Reason, eventActionBuild, "%s", built.Message)
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -644,6 +723,7 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&networkingv1.Ingress{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Owns(&batchv1.Job{}).
 		Named("app").
 		Complete(r)
 }

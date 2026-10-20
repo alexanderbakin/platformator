@@ -1,0 +1,22 @@
+# An App built from Git. Needs the operator's REGISTRY and a Secret named
+# registry-credentials (type kubernetes.io/dockerconfigjson) in this namespace.
+apiVersion: platformator.alexanderbakin.com/v1alpha1
+kind: App
+metadata:
+  name: hello-git
+spec:
+  source:
+    git:
+      url: https://github.com/alexanderbakin/platformator
+      branch: main
+      path: examples/hello
+  port: 80
+  minReplicas: 1
+  maxReplicas: 3
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "50M"
+    limits:
+      cpu: "100m"
+      memory: "100M"

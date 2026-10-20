@@ -40,6 +40,10 @@ spec:
       name: TLS
       priority: 1
       type: string
+    - jsonPath: .status.build.commit
+      name: Commit
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -310,7 +314,9 @@ spec:
                 - path
                 type: object
               image:
-                description: image is the container image to run, for example "nginx:1.27".
+                description: |-
+                  image is a ready-made container image to run, for example "nginx:1.27".
+                  Set either image or source.
                 maxLength: 255
                 minLength: 1
                 pattern: ^\S+$
@@ -395,6 +401,46 @@ spec:
                   rule: ('cpu' in self.limits && 'cpu' in self.requests && 'memory'
                     in self.limits && 'memory' in self.requests) && !quantity(self.limits['cpu']).isLessThan(quantity(self.requests['cpu']))
                     && !quantity(self.limits['memory']).isLessThan(quantity(self.requests['memory']))
+              source:
+                description: |-
+                  source builds the image from a Git repository instead of using a
+                  ready-made one. The operator builds the repository's Dockerfile in the
+                  cluster whenever the branch has a new commit, and runs the result. Set
+                  either image or source.
+                properties:
+                  git:
+                    description: git is the repository to build.
+                    properties:
+                      branch:
+                        default: main
+                        description: branch is the branch to follow. A new commit
+                          on it triggers a new build.
+                        pattern: ^[A-Za-z0-9._/-]+$
+                        type: string
+                      dockerfile:
+                        default: Dockerfile
+                        description: dockerfile is the name of the Dockerfile inside
+                          path.
+                        pattern: ^[A-Za-z0-9._-]+$
+                        type: string
+                      path:
+                        description: |-
+                          path is the directory inside the repository that holds the Dockerfile and
+                          the files it uses, for example "services/api". It defaults to the root.
+                        pattern: ^[A-Za-z0-9._/-]+$
+                        type: string
+                      url:
+                        description: |-
+                          url is the HTTPS address of a public repository, for example
+                          "https://github.com/owner/repo".
+                        pattern: ^https://\S+$
+                        type: string
+                    required:
+                    - url
+                    type: object
+                required:
+                - git
+                type: object
               targetCPUUtilizationPercentage:
                 default: 50
                 format: int32
@@ -402,17 +448,43 @@ spec:
                 minimum: 1
                 type: integer
             required:
-            - image
             - port
             - resources
             type: object
             x-kubernetes-validations:
+            - message: set exactly one of image and source
+              rule: has(self.image) != has(self.source)
             - message: maxReplicas must be greater than or equal to minReplicas
               rule: '!has(self.minReplicas) || !has(self.maxReplicas) || self.maxReplicas
                 >= self.minReplicas'
           status:
             description: status defines the observed state of App
             properties:
+              build:
+                description: build is the state of the builds, for an App that has
+                  spec.source.
+                properties:
+                  commit:
+                    description: commit is the commit of the most recent build, whether
+                      it worked or not.
+                    type: string
+                  image:
+                    description: |-
+                      image is the image of the last build that succeeded, the one the App
+                      runs. It stays in place while a newer commit builds or fails to build.
+                    type: string
+                  jobName:
+                    description: jobName is the Job that builds commit. Its logs show
+                      the build output.
+                    type: string
+                  message:
+                    description: message explains a failed build.
+                    type: string
+                  state:
+                    description: state is Running, Succeeded or Failed, for the build
+                      of commit.
+                    type: string
+                type: object
               conditions:
                 description: |-
                   conditions represent the current state of the App resource.

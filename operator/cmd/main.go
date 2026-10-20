@@ -37,6 +37,7 @@ import (
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
 	"github.com/alexanderbakin/platformator/operator/internal/controller"
+	"github.com/alexanderbakin/platformator/operator/internal/gitrepo"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -66,6 +67,13 @@ func main() {
 	var domain string
 	flag.StringVar(&domain, "domain", os.Getenv("DOMAIN"), "Base domain apps are served on, e.g. paas.example.com. "+
 		"Falls back to the DOMAIN env var.")
+	var registry, registrySecret, builderImage string
+	flag.StringVar(&registry, "registry", os.Getenv("REGISTRY"), "Registry path images built from Git are pushed to, "+
+		"e.g. ghcr.io/alexanderbakin. Falls back to the REGISTRY env var. Without it, spec.source is rejected.")
+	flag.StringVar(&registrySecret, "registry-secret", "registry-credentials",
+		"Name of the dockerconfigjson Secret, in each App's namespace, used to push and pull built images.")
+	flag.StringVar(&builderImage, "buildkit-image", "moby/buildkit:v0.23.2-rootless",
+		"Rootless BuildKit image that runs the build Jobs.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -191,10 +199,14 @@ func main() {
 	}
 
 	if err := (&controller.AppReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Domain:   domain,
-		Recorder: mgr.GetEventRecorder("app-controller"),
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Domain:         domain,
+		Recorder:       mgr.GetEventRecorder("app-controller"),
+		Registry:       registry,
+		RegistrySecret: registrySecret,
+		BuilderImage:   builderImage,
+		Resolver:       &gitrepo.HTTP{},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")
 		os.Exit(1)

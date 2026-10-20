@@ -29,5 +29,5 @@ go.work
 # Kubeconfig might contain secrets
 *.kubeconfig
 
-# File containing the DOMAIN environment variable
-config/default/domain.env
+# Per-installation settings (DOMAIN, REGISTRY), see operator.env.example
+config/default/operator.env

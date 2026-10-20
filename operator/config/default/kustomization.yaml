@@ -39,7 +39,7 @@ patches:
 - path: manager_metrics_patch.yaml
   target:
     kind: Deployment
-- path: manager_domain_patch.yaml
+- path: manager_env_patch.yaml
   target:
     kind: Deployment
 
@@ -236,6 +236,6 @@ patches:
 # +kubebuilder:scaffold:crdkustomizecainjectionname
 
 configMapGenerator:
-- name: operator-domain-config
+- name: operator-config
   envs:
-  - domain.env
+  - operator.env
