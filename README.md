@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 16 of 30.
+Day 17 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -15,6 +15,7 @@ What the operator does today:
 - **Public URL and TLS status:** `status.url` holds the address the App is served on, and the `CertificateReady` condition follows the cert-manager Certificate for it (`True` once issued, `False` with cert-manager's own reason while pending, `Unknown` if cert-manager isn't installed).
 - **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available and, if cert-manager is installed, the TLS certificate is issued. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving, and while the certificate is pending.
 - **Events:** each App gets Kubernetes Events when its `Ready` or `Reconciled` condition changes and when its certificate is issued, so `kubectl describe app <name>` shows the history (rollout in progress, certificate pending, ready, failures). Events are sent on changes only, not on every reconcile pass.
+- **Config reload and security:** pods restart by themselves when a Secret or ConfigMap they read changes, and every pod gets no privilege escalation and the default seccomp profile, with non-root, read-only filesystem and dropped capabilities available under `spec.security`. See [Configuration and Secrets](#configuration-and-secrets) and [Security defaults](#security-defaults).
 - **Builds from Git:** instead of an `image`, an App can name a public repository. The operator watches the branch, builds the Dockerfile in the cluster with BuildKit, pushes to GHCR and rolls the Deployment to the new image. See [Building from Git](#building-from-git).
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `operator.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
@@ -79,6 +80,10 @@ Each entry says what was chosen, why, and what it costs.
 **Builds run as BuildKit Jobs in the cluster.** The operator does not build anything itself, and it needs no Docker daemon: a Job runs rootless BuildKit against the repository at an exact commit and pushes to GHCR. The Deployment moves only when a build succeeded, so a broken commit never takes the App down. A failed commit is not retried. Cost: the node must allow the rootless profile (seccomp and AppArmor unconfined), and only public repositories work for now.
 
 **Registry credentials are a personal access token in a Secret.** The build Job and the Deployment use a classic PAT from a `registry-credentials` Secret. GitHub can't scope a classic token below `repo` when it has `write:packages`, and fine-grained tokens don't reach GHCR, so the token can read and write private repositories. That is acceptable for a one-person demo cluster. A real setup would use a machine account that owns no repositories, or build in CI with the per-run `GITHUB_TOKEN`.
+
+**Config changes restart pods through an annotation, not a data hash.** The operator fingerprints the `resourceVersion` of the Secrets and ConfigMaps an App uses and puts it on the pod template. It never reads the data, so credentials stay out of its memory. Cost: Kubernetes cannot give metadata-only access, so the operator can `get`, `list` and `watch` every Secret and ConfigMap, and a metadata-only change (a label) restarts pods too. Alternatives were a hash of the data (needs the same permissions and reads the values), a tool like Reloader (another component), and immutable Secrets (a new name per change).
+
+**Hardening that can break an image is opt-in.** No privilege escalation and the default seccomp profile are always on. Non-root, a read-only filesystem and dropped capabilities are `spec.security` options, because a default that stops nginx or postgres from starting is a worse platform than one that asks. Cost: Apps are not hardened until someone asks.
 
 **Polling Git instead of webhooks.** A webhook needs a public endpoint on the operator, a secret and per-provider setup. Polling works with any HTTPS Git host and nothing exposed. Cost: up to a minute of delay and one request per App per minute.
 
@@ -320,9 +325,25 @@ spec:
         name: settings
 ```
 
-Every key of the Secret or ConfigMap becomes an environment variable. Each entry sets exactly one of `secretRef` and `configMapRef`. The objects must exist in the App's namespace: until they do, the pod cannot start (`CreateContainerConfigError`) and the App stays not Ready, then it starts by itself once they exist. The operator never reads the Secret, only the pod does.
+Every key of the Secret or ConfigMap becomes an environment variable. Each entry sets exactly one of `secretRef` and `configMapRef`. The objects must exist in the App's namespace: until they do, the pod cannot start (`CreateContainerConfigError`) and the App stays not Ready, then it starts by itself once they exist. The operator never reads the values: only the pod does, and the operator looks at the object's metadata (see below).
 
-Pods read these values when they start. After changing a Secret or ConfigMap, delete the pods (`kubectl delete pod -l app=<name>`) so the new ones pick up the change.
+Pods read these values when they start, so a change has to restart them. The operator does that for you: it watches the Secrets and ConfigMaps an App uses (through `envFrom` and `env.valueFrom`) and keeps a short fingerprint of their versions in the annotation `platformator.alexanderbakin.com/config-revision` on the pod template. When one changes, the annotation changes and the Deployment rolls out new pods with the new values. A Secret that did not exist yet changes the fingerprint when it appears.
+
+The operator reads only the metadata of these objects, never their data, so a Secret's contents never enter the operator's memory. Kubernetes cannot grant metadata-only access, though, so the operator's role has `get`, `list` and `watch` on Secrets and ConfigMaps in every namespace. An App that uses neither gets no annotation and is never restarted by this. `kubectl rollout restart` still does not stick, because the operator rewrites the pod template on every pass.
+
+### Security defaults
+
+Every App's pods run with no privilege escalation and the container runtime's default seccomp profile. Both are safe for ordinary images. Three more settings can break an image, so they are opt-in under `spec.security`:
+
+```yaml
+spec:
+  security:
+    runAsNonRoot: true            # refuse to start if the image would run as root
+    readOnlyRootFilesystem: true  # the app must not write outside volumes
+    dropCapabilities: true        # drop all capabilities except NET_BIND_SERVICE
+```
+
+Turn them on for an image you know works with them. `dropCapabilities` stops images that start as root and then switch user (nginx, postgres, redis), which is why it is not the default.
 
 ### Building from Git
 
@@ -344,7 +365,7 @@ How it works:
 - The operator asks the Git server for the head of the branch once a minute (plain HTTPS, no `git` binary, no webhook to expose).
 - For a commit it has not built yet, it starts a rootless [BuildKit](https://github.com/moby/buildkit) Job that builds the Dockerfile and pushes `<REGISTRY>/<namespace>-<name>:<commit>`.
 - When the Job succeeds, the Deployment moves to that image. While a build runs or fails, the previous image keeps running, so a broken commit never takes the App down. A failed commit is not retried; push a new one.
-- `kubectl get app -o wide` shows the built `COMMIT`, the `Built` condition has the state, and `status.build.jobName` points at the Job whose logs hold the build output.
+- `kubectl get app -o wide` shows the image that runs (its tag is the commit), the `Built` condition has the state, and `status.build.jobName` points at the Job whose logs hold the build output.
 
 Setup, once:
 
@@ -431,3 +452,4 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 13. [Day 13](https://lnkd.in/p/dFyjVT_f)
 14. [Day 14](https://lnkd.in/p/dfXV5UEX)
 15. [Day 15](https://lnkd.in/p/dMwxi4HZ)
+16. [Day 16](https://lnkd.in/p/dhNEFJTX)

@@ -85,6 +85,31 @@ type AppSpec struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="('cpu' in self.limits && 'cpu' in self.requests && 'memory' in self.limits && 'memory' in self.requests) && !quantity(self.limits['cpu']).isLessThan(quantity(self.requests['cpu'])) && !quantity(self.limits['memory']).isLessThan(quantity(self.requests['memory']))",message="CPU and memory limits/requests must be set and limits must be greater than or equal to requests"
 	Resources corev1.ResourceRequirements `json:"resources"`
+
+	// security tightens the container beyond the defaults every App gets
+	// (no privilege escalation, the runtime's default seccomp profile).
+	// +optional
+	Security *Security `json:"security,omitempty"`
+}
+
+// Security holds the hardening options that can break images, so they are
+// opt-in. Turn them on for an image that is known to work with them.
+type Security struct {
+	// runAsNonRoot refuses to start a container whose image would run as root.
+	// +optional
+	RunAsNonRoot bool `json:"runAsNonRoot,omitempty"`
+
+	// readOnlyRootFilesystem makes the container's filesystem read-only. The
+	// application must not write outside of volumes.
+	// +optional
+	ReadOnlyRootFilesystem bool `json:"readOnlyRootFilesystem,omitempty"`
+
+	// dropCapabilities removes every Linux capability except
+	// NET_BIND_SERVICE, which is kept so ports below 1024 still work. Images
+	// that start as root and then switch user (nginx, for example) need
+	// capabilities and will not start with this on.
+	// +optional
+	DropCapabilities bool `json:"dropCapabilities,omitempty"`
 }
 
 // Source says where the code of an App comes from.
@@ -172,6 +197,11 @@ type AppStatus struct {
 	// +optional
 	URL string `json:"url,omitempty"`
 
+	// image is the image the App is meant to run: spec.image, or the image of
+	// the last successful build for an App that has spec.source.
+	// +optional
+	Image string `json:"image,omitempty"`
+
 	// build is the state of the builds, for an App that has spec.source.
 	// +optional
 	Build *BuildStatus `json:"build,omitempty"`
@@ -202,11 +232,10 @@ type AppStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].reason`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-// +kubebuilder:printcolumn:name="Image",type=string,priority=1,JSONPath=`.spec.image`
+// +kubebuilder:printcolumn:name="Image",type=string,priority=1,JSONPath=`.status.image`
 // +kubebuilder:printcolumn:name="URL",type=string,priority=1,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Reconciled",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`
 // +kubebuilder:printcolumn:name="TLS",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="CertificateReady")].status`
-// +kubebuilder:printcolumn:name="Commit",type=string,priority=1,JSONPath=`.status.build.commit`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name) <= 63",message="name must be a DNS label (lowercase letters, digits and dashes, starting with a letter, at most 63 characters) because it becomes the Service name and the hostname"
 
 // App is the Schema for the apps API

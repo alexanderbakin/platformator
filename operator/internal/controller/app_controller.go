@@ -35,8 +35,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
@@ -74,6 +76,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -231,6 +234,8 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		return ctrl.Result{}, fmt.Errorf("reconciling build: %w", err)
 	}
 
+	app.Status.Image = build.image
+
 	if dep, err = r.reconcileDeployment(ctx, &app, build.image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
 	}
@@ -284,11 +289,21 @@ func (r *AppReconciler) reconcileDeployment(
 	}
 
 	readiness, liveness := probesFor(app)
+	podSecurity, containerSecurity := securityFor(app)
+
+	revision, err := r.configRevision(ctx, app)
+	if err != nil {
+		return nil, err
+	}
+	var podAnnotations map[string]string
+	if revision != "" {
+		podAnnotations = map[string]string{configRevisionAnnotation: revision}
+	}
 
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
 	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
 		if dep.CreationTimestamp.IsZero() {
 			dep.Spec.Replicas = &replicas
 		}
@@ -300,9 +315,10 @@ func (r *AppReconciler) reconcileDeployment(
 			pullSecrets = []corev1.LocalObjectReference{{Name: r.RegistrySecret}}
 		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app)},
+			ObjectMeta: metav1.ObjectMeta{Labels: labelsFor(app), Annotations: podAnnotations},
 			Spec: corev1.PodSpec{
 				ImagePullSecrets: pullSecrets,
+				SecurityContext:  podSecurity,
 				Containers: []corev1.Container{{
 					Name:      app.Name,
 					Image:     image,
@@ -311,14 +327,48 @@ func (r *AppReconciler) reconcileDeployment(
 					Env:       app.Spec.Env,
 					EnvFrom:   app.Spec.EnvFrom,
 
-					ReadinessProbe: readiness,
-					LivenessProbe:  liveness,
+					SecurityContext: containerSecurity,
+					ReadinessProbe:  readiness,
+					LivenessProbe:   liveness,
 				}},
 			},
 		}
 		return controllerutil.SetControllerReference(app, dep, r.Scheme)
 	})
 	return dep, err
+}
+
+// securityFor returns the pod and container security settings of an App.
+//
+// Two settings are always on because they do not break images: no privilege
+// escalation, and the container runtime's default seccomp profile. The ones
+// that can break an image are opt-in through spec.security: running as
+// non-root, a read-only root filesystem, and dropping capabilities. Dropping
+// them by default would stop every image that starts as root and switches user
+// (nginx, postgres, redis), and nothing should fail to start on a default.
+func securityFor(app *platformatorv1alpha1.App) (*corev1.PodSecurityContext, *corev1.SecurityContext) {
+	pod := &corev1.PodSecurityContext{
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+	container := &corev1.SecurityContext{AllowPrivilegeEscalation: new(false)}
+
+	opts := app.Spec.Security
+	if opts == nil {
+		return pod, container
+	}
+	if opts.RunAsNonRoot {
+		pod.RunAsNonRoot = new(true)
+	}
+	if opts.ReadOnlyRootFilesystem {
+		container.ReadOnlyRootFilesystem = new(true)
+	}
+	if opts.DropCapabilities {
+		container.Capabilities = &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"NET_BIND_SERVICE"},
+		}
+	}
+	return pod, container
 }
 
 // probesFor returns the readiness and liveness probes of an App.
@@ -724,6 +774,10 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.Ingress{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&batchv1.Job{}).
+		// Secrets and ConfigMaps are watched by metadata only, so the operator
+		// never holds their data in memory.
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.appsUsing(kindSecret)), builder.OnlyMetadata).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.appsUsing(kindConfigMap)), builder.OnlyMetadata).
 		Named("app").
 		Complete(r)
 }

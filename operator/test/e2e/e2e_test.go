@@ -536,6 +536,60 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(status).To(Equal("True"))
 			}).WithTimeout(4 * time.Minute).Should(Succeed())
 		})
+
+		It("should roll its pods when a ConfigMap it reads from changes", func() {
+			const (
+				name          = "e2e-config-reload"
+				configMapName = "e2e-config-reload-settings"
+				annotation    = `{.spec.template.metadata.annotations.platformator\.alexanderbakin\.com/config-revision}`
+			)
+			revision := func() (string, error) {
+				cmd := exec.Command("kubectl", "get", "deployment", name, "-n", appNamespace,
+					"-o", "jsonpath="+annotation)
+				return utils.Run(cmd)
+			}
+
+			By("creating the ConfigMap and an App that reads from it")
+			cmd := exec.Command("kubectl", "create", "configmap", configMapName,
+				"-n", appNamespace, "--from-literal=WHOAMI_NAME=before")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the ConfigMap")
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "configmap", configMapName,
+					"-n", appNamespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+			ensureSelfSignedIssuer()
+			applyAppManifest(name, appManifest(name, "traefik/whoami:latest")+
+				"  envFrom:\n    - configMapRef:\n        name: "+configMapName+"\n")
+
+			By("waiting until the App is Ready with a revision on its pod template")
+			var before string
+			Eventually(func(g Gomega) {
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+				before, err = revision()
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(before).NotTo(BeEmpty())
+			}).WithTimeout(4 * time.Minute).Should(Succeed())
+
+			By("changing the ConfigMap")
+			cmd = exec.Command("kubectl", "patch", "configmap", configMapName, "-n", appNamespace,
+				"--type=merge", "-p", `{"data":{"WHOAMI_NAME":"after"}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch the ConfigMap")
+
+			By("waiting for a new revision, and for the App to be Ready again")
+			Eventually(func(g Gomega) {
+				after, err := revision()
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(after).NotTo(Equal(before))
+				status, err := appConditionField(name, "Ready", "status")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"))
+			}).WithTimeout(4 * time.Minute).Should(Succeed())
+		})
 	})
 })
 
