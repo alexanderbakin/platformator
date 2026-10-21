@@ -5,8 +5,14 @@ variable "region" {
 
 variable "instance_type" {
   type        = string
-  description = "Type of the EC2 instance"
-  default     = "t3.micro"
+  description = "Type of the EC2 instance. 8 GB of memory (t3.large) fits k3s, the operator, monitoring and a few Apps; a t3.micro does not."
+  default     = "t3.large"
+}
+
+variable "root_volume_size_gb" {
+  type        = number
+  description = "Size of the root volume in GB, for images, build state and metrics"
+  default     = 30
 }
 
 variable "vpc_cidr" {

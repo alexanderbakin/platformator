@@ -92,6 +92,11 @@ resource "aws_instance" "main" {
   vpc_security_group_ids = [aws_security_group.main.id]
   subnet_id              = aws_subnet.main.id
   key_name               = aws_key_pair.developer.key_name
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = var.root_volume_size_gb
+  }
 }
 
 # https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eip
