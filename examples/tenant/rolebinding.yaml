@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: app-team
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-team
+subjects:
+  # Change to your users or groups (from your OIDC provider or client certificates).
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: team-a

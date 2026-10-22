@@ -62,6 +62,17 @@ type AppReconciler struct {
 	// Resolver finds the head commit of a branch.
 	Resolver HeadResolver
 
+	// BuildTimeout stops a build Job that runs longer than this. Zero means no limit.
+	BuildTimeout time.Duration
+
+	// MaxBuilds is how many builds may run at once in the whole cluster, the
+	// rest wait as Queued. Zero means no limit.
+	MaxBuilds int
+
+	// IngressNamespace is where the ingress controller runs; only its pods may
+	// connect to an App. It defaults to kube-system, where k3s runs Traefik.
+	IngressNamespace string
+
 	// Recorder publishes Kubernetes Events about each App, visible in
 	// `kubectl describe app`. It may be nil (tests), then no events are sent.
 	Recorder events.EventRecorder
@@ -73,6 +84,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -113,6 +125,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	// build says which image to run and when to look at Git again.
 	var build buildOutcome
 
+	// hostTaken is the older App that owns this App's hostname, if any.
+	var hostTaken *platformatorv1alpha1.App
+	var hostRetry time.Duration
+
 	// This runs right before Reconcile actually returns, whichever of the
 	// return statements below fires. It records two status conditions and
 	// persists them via the status subresource:
@@ -131,65 +147,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			return
 		}
 
-		reconciled := metav1.Condition{
-			Type:               "Reconciled",
-			Status:             metav1.ConditionTrue,
-			Reason:             "ReconcileSucceeded",
-			Message:            "Deployment, Service, Ingress and HorizontalPodAutoscaler are up to date",
-			ObservedGeneration: app.Generation,
-		}
-		ready := metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			Reason:             "DeploymentAvailable",
-			Message:            "Deployment is fully rolled out and available",
-			ObservedGeneration: app.Generation,
-		}
-
-		avail := deploymentCondition(dep, appsv1.DeploymentAvailable)
-		progressing := deploymentCondition(dep, appsv1.DeploymentProgressing)
-		rolledOut, rolloutMessage := rolloutComplete(dep)
-		switch {
-		case err != nil:
-			reconciled.Status = metav1.ConditionFalse
-			reconciled.Reason = reasonReconcileError
-			reconciled.Message = err.Error()
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = reasonReconcileError
-			ready.Message = "Reconcile failed, see the Reconciled condition"
-		case app.Spec.Source != nil && build.image == "":
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = reasonImageNotBuilt
-			ready.Message = "No image has been built from Git yet"
-			if app.Status.Build != nil && app.Status.Build.Message != "" {
-				ready.Message += ": " + app.Status.Build.Message
-			}
-		case avail == nil:
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = reasonDeploymentUnavailable
-			ready.Message = "Deployment has not reported an Available condition yet"
-		case avail.Status != corev1.ConditionTrue:
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = reasonDeploymentUnavailable
-			ready.Message = avail.Message
-		case progressing != nil && progressing.Status == corev1.ConditionFalse &&
-			progressing.Reason == progressDeadlineExceeded:
-			// The rollout stalled: old pods may keep Available=True, but the
-			// new ones never became available within the progress deadline.
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = progressDeadlineExceeded
-			ready.Message = progressing.Message
-		case !rolledOut:
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = reasonRolloutInProgress
-			ready.Message = rolloutMessage
-		case certCond != nil && certCond.Status == metav1.ConditionFalse:
-			// The pods are fine, but the App's HTTPS address would still show a
-			// certificate error. Unknown (no cert-manager) does not block.
-			ready.Status = metav1.ConditionFalse
-			ready.Reason = reasonCertificateNotReady
-			ready.Message = "TLS certificate is not issued yet: " + certCond.Message
-		}
+		reconciled, ready := r.conditionsFor(&app, passResult{
+			err: err, dep: dep, certCond: certCond, build: build, hostTaken: hostTaken,
+		})
 
 		previous := conditionsByType(app.Status.Conditions)
 
@@ -209,7 +169,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			// installed), so look again later: soon while it is not issued, and
 			// slowly afterwards, to notice a renewal that fails. Branches are
 			// polled the same way.
-			result.RequeueAfter = soonest(result.RequeueAfter, certificateRequeueAfter(certCond), build.requeue)
+			result.RequeueAfter = soonest(result.RequeueAfter, certificateRequeueAfter(certCond), build.requeue, hostRetry)
 		}
 
 		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
@@ -230,6 +190,15 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		}
 	}()
 
+	if hostTaken, err = r.hostConflict(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("checking the hostname: %w", err)
+	}
+	if hostTaken != nil {
+		app.Status.URL = ""
+		hostRetry = hostRetryInterval
+		return ctrl.Result{}, nil
+	}
+
 	if build, err = r.reconcileBuild(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling build: %w", err)
 	}
@@ -247,6 +216,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	if err = r.reconcileIngress(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
 	}
+	if err = r.reconcileNetworkPolicy(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling network policy: %w", err)
+	}
 	app.Status.URL = "https://" + r.hostFor(&app)
 	tls := r.certificateCondition(ctx, &app)
 	certCond = &tls
@@ -257,6 +229,99 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 
 	log.Info("reconciled App")
 	return ctrl.Result{}, nil
+}
+
+// passResult is what one reconcile pass learned, the input of the status
+// conditions.
+type passResult struct {
+	err       error
+	dep       *appsv1.Deployment
+	certCond  *metav1.Condition
+	build     buildOutcome
+	hostTaken *platformatorv1alpha1.App
+}
+
+// conditionsFor works out the Reconciled and Ready conditions after a pass.
+// Ready is decided by the first rule that applies, from most to least specific.
+func (r *AppReconciler) conditionsFor(
+	app *platformatorv1alpha1.App, p passResult,
+) (reconciled, ready metav1.Condition) {
+	reconciled = metav1.Condition{
+		Type:               "Reconciled",
+		Status:             metav1.ConditionTrue,
+		Reason:             "ReconcileSucceeded",
+		Message:            "Deployment, Service, Ingress and HorizontalPodAutoscaler are up to date",
+		ObservedGeneration: app.Generation,
+	}
+	ready = metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		Reason:             "DeploymentAvailable",
+		Message:            "Deployment is fully rolled out and available",
+		ObservedGeneration: app.Generation,
+	}
+
+	avail := deploymentCondition(p.dep, appsv1.DeploymentAvailable)
+	progressing := deploymentCondition(p.dep, appsv1.DeploymentProgressing)
+	replicaFailure := deploymentCondition(p.dep, appsv1.DeploymentReplicaFailure)
+	rolledOut, rolloutMessage := rolloutComplete(p.dep)
+	switch {
+	case p.err != nil:
+		reconciled.Status = metav1.ConditionFalse
+		reconciled.Reason = reasonReconcileError
+		reconciled.Message = p.err.Error()
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonReconcileError
+		ready.Message = "Reconcile failed, see the Reconciled condition"
+	case p.hostTaken != nil:
+		// Nothing failed, but this App cannot be served: its address belongs
+		// to an older App with the same name in another namespace.
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonHostTaken
+		ready.Message = fmt.Sprintf("Hostname %s is already used by App %s/%s, rename this App",
+			r.hostFor(app), p.hostTaken.Namespace, p.hostTaken.Name)
+	case app.Spec.Source != nil && p.build.image == "":
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonImageNotBuilt
+		ready.Message = "No image has been built from Git yet"
+		if app.Status.Build != nil && app.Status.Build.Message != "" {
+			ready.Message += ": " + app.Status.Build.Message
+		}
+	case replicaFailure != nil && replicaFailure.Status == corev1.ConditionTrue:
+		// The Deployment cannot create pods, for example because the
+		// namespace's quota is used up or a LimitRange refuses the App's
+		// limits. Old pods may still be Available, so this goes first.
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonReplicaFailure
+		ready.Message = replicaFailure.Message
+	case avail == nil:
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonDeploymentUnavailable
+		ready.Message = "Deployment has not reported an Available condition yet"
+	case avail.Status != corev1.ConditionTrue:
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonDeploymentUnavailable
+		ready.Message = avail.Message
+	case progressing != nil && progressing.Status == corev1.ConditionFalse &&
+		progressing.Reason == progressDeadlineExceeded:
+		// The rollout stalled: old pods may keep Available=True, but the
+		// new ones never became available within the progress deadline.
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = progressDeadlineExceeded
+		ready.Message = progressing.Message
+	case !rolledOut:
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonRolloutInProgress
+		ready.Message = rolloutMessage
+	case p.certCond != nil && p.certCond.Status == metav1.ConditionFalse:
+		// The pods are fine, but the App's HTTPS address would still show a
+		// certificate error. Unknown (no cert-manager) does not block.
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = reasonCertificateNotReady
+		ready.Message = "TLS certificate is not issued yet: " + p.certCond.Message
+	}
+
+	return reconciled, ready
 }
 
 func labelsFor(app *platformatorv1alpha1.App) map[string]string {
@@ -597,6 +662,7 @@ const (
 const (
 	reasonDeploymentUnavailable = "DeploymentUnavailable"
 	reasonRolloutInProgress     = "RolloutInProgress"
+	reasonReplicaFailure        = "ReplicaFailure"
 )
 
 // certificateRequeueAfter says when to look at the App's certificate again. It
@@ -734,7 +800,8 @@ func (r *AppReconciler) emitTransitionEvents(
 	prevReady, found := previous[ready.Type]
 	if changed(prevReady, found, ready) {
 		eventType := corev1.EventTypeNormal
-		if ready.Reason == reasonReconcileError || ready.Reason == progressDeadlineExceeded {
+		if ready.Reason == reasonReconcileError || ready.Reason == progressDeadlineExceeded ||
+			ready.Reason == reasonReplicaFailure || ready.Reason == reasonHostTaken {
 			eventType = corev1.EventTypeWarning
 		}
 		r.Recorder.Eventf(app, nil, eventType, ready.Reason, eventActionRollout, "%s", ready.Message)
@@ -774,6 +841,7 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.Ingress{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&batchv1.Job{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		// Secrets and ConfigMaps are watched by metadata only, so the operator
 		// never holds their data in memory.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.appsUsing(kindSecret)), builder.OnlyMetadata).

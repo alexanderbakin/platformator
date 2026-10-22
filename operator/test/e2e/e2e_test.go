@@ -590,6 +590,59 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(status).To(Equal("True"))
 			}).WithTimeout(4 * time.Minute).Should(Succeed())
 		})
+
+		It("should say why it is not Ready when the namespace quota refuses its pods", func() {
+			const (
+				name      = "e2e-quota"
+				namespace = "e2e-quota-ns"
+			)
+
+			By("creating a namespace whose quota allows no pods at all")
+			quota := fmt.Sprintf(`apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: no-pods
+  namespace: %s
+spec:
+  hard:
+    pods: "0"
+`, namespace, namespace)
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(quota)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the namespace and its quota")
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "namespace", namespace, "--ignore-not-found", "--wait=false")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("creating an App in it")
+			manifest := strings.ReplaceAll(appManifest(name, "traefik/whoami:latest"),
+				"namespace: "+appNamespace, "namespace: "+namespace)
+			cmd = exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(manifest)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to apply the App")
+
+			By("waiting for Ready to be False with the quota message")
+			Eventually(func(g Gomega) {
+				field := func(f string) string {
+					cmd := exec.Command("kubectl", "get", "app", name, "-n", namespace, "-o",
+						fmt.Sprintf(`jsonpath={.status.conditions[?(@.type=="Ready")].%s}`, f))
+					out, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					return out
+				}
+				g.Expect(field("status")).To(Equal("False"))
+				g.Expect(field("reason")).To(Equal("ReplicaFailure"))
+				g.Expect(field("message")).To(ContainSubstring("quota"))
+			}).WithTimeout(2 * time.Minute).Should(Succeed())
+		})
 	})
 })
 

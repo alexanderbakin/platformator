@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 17 of 30.
+Day 18 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -16,6 +16,7 @@ What the operator does today:
 - **Status conditions:** `Reconciled` means every API call in the last pass succeeded. `Ready` means the Deployment's rollout is complete and Available and, if cert-manager is installed, the TLS certificate is issued. `Ready` stays False while a rollout is in progress or stuck, even if old pods are still serving, and while the certificate is pending.
 - **Events:** each App gets Kubernetes Events when its `Ready` or `Reconciled` condition changes and when its certificate is issued, so `kubectl describe app <name>` shows the history (rollout in progress, certificate pending, ready, failures). Events are sent on changes only, not on every reconcile pass.
 - **Config reload and security:** pods restart by themselves when a Secret or ConfigMap they read changes, and every pod gets no privilege escalation and the default seccomp profile, with non-root, read-only filesystem and dropped capabilities available under `spec.security`. See [Configuration and Secrets](#configuration-and-secrets) and [Security defaults](#security-defaults).
+- **Isolation and build safety:** every App gets a NetworkPolicy that lets only the ingress controller in, an App whose hostname belongs to an older App in another namespace waits with `HostTaken`, a quota that refuses pods is reported on `Ready` as `ReplicaFailure`, and builds have a timeout, a concurrency limit and resource limits. See [Network isolation](#network-isolation), [Teams and quotas](#teams-and-quotas) and the [Threat model](#threat-model).
 - **Builds from Git:** instead of an `image`, an App can name a public repository. The operator watches the branch, builds the Dockerfile in the cluster with BuildKit, pushes to GHCR and rolls the Deployment to the new image. See [Building from Git](#building-from-git).
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `operator.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
@@ -84,6 +85,12 @@ Each entry says what was chosen, why, and what it costs.
 **Config changes restart pods through an annotation, not a data hash.** The operator fingerprints the `resourceVersion` of the Secrets and ConfigMaps an App uses and puts it on the pod template. It never reads the data, so credentials stay out of its memory. Cost: Kubernetes cannot give metadata-only access, so the operator can `get`, `list` and `watch` every Secret and ConfigMap, and a metadata-only change (a label) restarts pods too. Alternatives were a hash of the data (needs the same permissions and reads the values), a tool like Reloader (another component), and immutable Secrets (a new name per change).
 
 **Hardening that can break an image is opt-in.** No privilege escalation and the default seccomp profile are always on. Non-root, a read-only filesystem and dropped capabilities are `spec.security` options, because a default that stops nginx or postgres from starting is a worse platform than one that asks. Cost: Apps are not hardened until someone asks.
+
+**Network isolation allows only ingress, not egress.** Every App gets a policy that lets only the ingress controller in. Restricting egress as well would stop Apps from reaching the internet and databases until each one listed its destinations, which is too much to ask of a small platform. Cost: a compromised App can still reach out, and `allowSameNamespace` is the only way for Apps to call each other.
+
+**The oldest App keeps a hostname.** An App is served on `<name>.<domain>` with no namespace in it, so same-named Apps would collide. Putting the namespace in the hostname would fix that but change every URL, so the older App keeps the address and the newer one waits with `HostTaken`. Cost: whoever creates a name first holds it.
+
+**Builds are limited by timeout, concurrency and resources, and fail closed on missing credentials.** One node cannot run many BuildKit pods at once, so a push to several Apps queues instead of piling up. A missing registry Secret is reported before a Job is created, since a pod waiting for it shows nothing on the App. Cost: a build can wait behind others, and a long build is cut off at the timeout.
 
 **Polling Git instead of webhooks.** A webhook needs a public endpoint on the operator, a secret and per-provider setup. Polling works with any HTTPS Git host and nothing exposed. Cost: up to a minute of delay and one request per App per minute.
 
@@ -378,7 +385,62 @@ kubectl create secret docker-registry registry-credentials \
   --docker-server=ghcr.io --docker-username=<your-github-name> --docker-password=<token>
 ```
 
-Limits for now: public repositories only, one Dockerfile build per commit, and the BuildKit Job runs rootless with seccomp and AppArmor unconfined, which the node must allow.
+Build safety:
+
+- A build is refused until the `registry-credentials` Secret exists in the App's namespace: `Built` is False with reason `RegistrySecretMissing` and the `kubectl create secret` command to run, and no Job is created. It starts by itself once the Secret exists.
+- A build Job is stopped after `--build-timeout` (default 15 minutes) and shows as `Failed` with `DeadlineExceeded`.
+- At most `--max-builds` builds run at once in the whole cluster (default 2). Others wait as `Queued` with `Built` Unknown and reason `BuildQueued`.
+- Build pods ask for 250m CPU and 512Mi and may use 1 CPU and 1.5Gi, so a ResourceQuota accepts them and one build cannot starve the node.
+- BuildKit keeps a layer cache in `<REGISTRY>/<namespace>-<name>:buildcache`, so a build reuses unchanged layers.
+
+Limits for now: public repositories only, one Dockerfile build per commit, and the BuildKit Job runs rootless with seccomp and AppArmor unconfined, which the node must allow. Old images and the cache stay in the registry; deleting them needs a token scope the operator does not hold.
+
+### Network isolation
+
+Every App gets a NetworkPolicy named after it. Only the ingress controller's pods (Traefik in `kube-system` on k3s, set with `--ingress-namespace`) may connect, and only to the App's port. Pods of other Apps and other namespaces cannot reach it, and neither can anything else in the cluster. Egress is not restricted: Apps need the internet and their databases.
+
+An App that another App must call through its Service opts in:
+
+```yaml
+spec:
+  network:
+    allowSameNamespace: true   # every pod in this namespace may connect
+```
+
+The policy needs a CNI that enforces NetworkPolicy. k3s does (it ships kube-router for this).
+
+### Teams and quotas
+
+Give each team its own namespace. `examples/tenant` is a ready kustomization for one:
+
+```sh
+kubectl apply -k examples/tenant      # copy the directory and change team-a for each team
+```
+
+It creates the namespace, a ResourceQuota (total CPU, memory, pods and number of Apps), a LimitRange (defaults and a ceiling per container) and a Role plus RoleBinding that let the team manage Apps, Secrets and ConfigMaps, and read pods, logs and events, in that namespace only. Each team creates its own `registry-credentials` Secret there if it builds from Git.
+
+Two rules to know:
+
+- **Hostnames are global.** An App is served on `<name>.<domain>`, whatever its namespace. If two Apps have the same name, the older one keeps the address and the newer one is not created: `Ready` is False with reason `HostTaken` and the message names the App that owns the host. Rename the newer one.
+- **A refused pod is visible.** If the namespace's quota is used up, or a LimitRange refuses the App's limits, the Deployment cannot create pods. `Ready` turns False with reason `ReplicaFailure` and the Deployment's own message (for example `exceeded quota`), even if older pods still run.
+
+Optional admission policies live in `operator/config/policies` (a warning on `latest` image tags and on `maxReplicas` above 10). They start in Warn and Audit mode, and need Kubernetes 1.30 or newer: `kubectl apply -k operator/config/policies`.
+
+### Threat model
+
+This is soft multi-tenancy for teams that trust each other, not isolation for hostile tenants. What is and is not protected:
+
+| Risk | What limits it | What remains |
+|---|---|---|
+| A Dockerfile runs arbitrary commands during a build | The build is rootless (uid 1000), not privileged, has CPU and memory limits, a timeout and a concurrency limit, and builds only public repositories at an exact commit | The pod runs with seccomp and AppArmor unconfined, which widens the kernel attack surface. A BuildKit or kernel escape would reach the node and every tenant on it |
+| A build reaches other things in the cluster | Nothing in the build pod holds a cluster credential | Its egress is open, so it can connect to cluster services and the internet |
+| The registry token leaks | It lives in a per-namespace Secret, mounted only into the build container, not into the build steps | The token is a personal access token with broad scopes (see Design Decisions). Anyone who can read the Secret, or compromise BuildKit, gets it. One registry account holds all images, so that token can overwrite any tenant's image |
+| The operator is compromised | It reads only the metadata of Secrets and ConfigMaps | Its role can read every Secret and ConfigMap in the cluster (Kubernetes cannot grant metadata-only access) and create workloads everywhere |
+| One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik, quotas cap usage, the older App keeps a hostname | Egress is open, the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
+| Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by tag, not digest. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
+| Secrets at rest | None here | k3s stores Secrets unencrypted in its datastore unless encryption is switched on |
+
+Out of scope: denial of service beyond quotas and the build limits, and tenants who are actively hostile. For those, builds would need to run in a separate cluster or a VM-based sandbox.
 
 ### Rolling back
 

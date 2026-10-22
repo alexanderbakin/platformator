@@ -40,7 +40,22 @@ const (
 	testCommitOne = "1111111111111111111111111111111111111111"
 	testCommitTwo = "2222222222222222222222222222222222222222"
 	testRegistry  = "ghcr.io/owner"
+
+	testRegistrySecret = "registry-credentials"
 )
+
+// ensureRegistrySecret creates the Secret the build Jobs need, unless an earlier
+// spec already did. Specs share one namespace and nothing deletes Secrets there.
+func ensureRegistrySecret(ctx context.Context) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testRegistrySecret, Namespace: testNamespace},
+		Type:       corev1.SecretTypeDockerConfigJson,
+		Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte("{}")},
+	}
+	if err := k8sClient.Create(ctx, secret); !apierrors.IsAlreadyExists(err) {
+		Expect(err).NotTo(HaveOccurred())
+	}
+}
 
 // fakeResolver answers with a fixed commit, so tests need no Git server.
 type fakeResolver struct {
@@ -131,8 +146,9 @@ var _ = Describe("App source", func() {
 	newReconciler := func(resolver HeadResolver) *AppReconciler {
 		return &AppReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Domain: testDomain,
-			Registry: testRegistry, RegistrySecret: "registry-credentials",
+			Registry: testRegistry, RegistrySecret: testRegistrySecret,
 			BuilderImage: "moby/buildkit:rootless", Resolver: resolver,
+			BuildTimeout: DefaultBuildTimeout,
 		}
 	}
 
@@ -151,6 +167,7 @@ var _ = Describe("App source", func() {
 	})
 
 	It("starts a build for each new commit and runs nothing until one finishes", func() {
+		ensureRegistrySecret(ctx)
 		app := sourceApp("git-app")
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
 		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, app)).To(Succeed()) })
@@ -169,6 +186,12 @@ var _ = Describe("App source", func() {
 		Expect(args).To(ContainElement("context=" + testRepoURL + ".git#" + testCommitOne))
 		Expect(args).To(ContainElement("type=image,name=" + testRegistry + "/default-git-app:111111111111,push=true"))
 		Expect(job.OwnerReferences).To(HaveLen(1))
+		Expect(job.Spec.ActiveDeadlineSeconds).To(HaveValue(Equal(int64(DefaultBuildTimeout.Seconds()))))
+		container := job.Spec.Template.Spec.Containers[0]
+		Expect(container.Resources.Requests).To(HaveKey(corev1.ResourceCPU), "a ResourceQuota refuses pods without requests")
+		Expect(container.Resources.Limits).To(HaveKey(corev1.ResourceMemory))
+		Expect(args).To(ContainElement(ContainSubstring("--import-cache")))
+		Expect(args).To(ContainElement("type=registry,ref=" + testRegistry + "/default-git-app:buildcache"))
 
 		Expect(k8sClient.Get(ctx, name, app)).To(Succeed())
 		Expect(app.Status.Build).NotTo(BeNil())
@@ -219,6 +242,65 @@ var _ = Describe("App source", func() {
 		Expect(app.Status.Build.Message).To(ContainSubstring("cannot read the branch"))
 		reconciled := meta.FindStatusCondition(app.Status.Conditions, "Reconciled")
 		Expect(reconciled.Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("does not start a build while the registry Secret is missing", func() {
+		app := sourceApp("git-nosecret")
+		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		DeferCleanup(func() { Expect(k8sClient.Delete(ctx, app)).To(Succeed()) })
+
+		name := types.NamespacedName{Name: app.Name, Namespace: app.Namespace}
+		reconciler := newReconciler(&fakeResolver{commit: testCommitOne})
+		reconciler.RegistrySecret = "no-such-secret"
+		result, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(result.RequeueAfter).To(BeNumerically(">", 0), "it must look again, the Secret may be created")
+
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: "git-nosecret-build-1111111", Namespace: app.Namespace}, &batchv1.Job{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "no Job without credentials")
+
+		Expect(k8sClient.Get(ctx, name, app)).To(Succeed())
+		Expect(app.Status.Build.State).To(Equal(buildBlocked))
+		Expect(app.Status.Build.Message).To(ContainSubstring("no-such-secret"))
+		built := meta.FindStatusCondition(app.Status.Conditions, conditionBuilt)
+		Expect(built).NotTo(BeNil())
+		Expect(built.Status).To(Equal(metav1.ConditionFalse))
+		Expect(built.Reason).To(Equal(reasonSecretMissing))
+		ready := meta.FindStatusCondition(app.Status.Conditions, "Ready")
+		Expect(ready.Reason).To(Equal(reasonImageNotBuilt))
+		Expect(ready.Message).To(ContainSubstring("no-such-secret"))
+	})
+
+	It("queues a build while too many are running", func() {
+		ensureRegistrySecret(ctx)
+		first, second := sourceApp("queue-first"), sourceApp("queue-second")
+		for _, a := range []*platformatorv1alpha1.App{first, second} {
+			Expect(k8sClient.Create(ctx, a)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, a)).To(Succeed()) })
+		}
+
+		reconciler := newReconciler(&fakeResolver{commit: testCommitOne})
+		// Jobs from other specs never finish in envtest, so count what is there
+		// and leave room for exactly one more.
+		running, err := reconciler.runningBuilds(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		reconciler.MaxBuilds = running + 1
+
+		for _, a := range []*platformatorv1alpha1.App{first, second} {
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: a.Name, Namespace: a.Namespace},
+			})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "queue-first-build-1111111", Namespace: testNamespace}, &batchv1.Job{})).To(Succeed())
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: "queue-second-build-1111111", Namespace: testNamespace}, &batchv1.Job{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "the second build must wait")
+
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: second.Name, Namespace: testNamespace}, second)).To(Succeed())
+		Expect(second.Status.Build.State).To(Equal(buildQueued))
+		built := meta.FindStatusCondition(second.Status.Conditions, conditionBuilt)
+		Expect(built.Reason).To(Equal(reasonBuildQueued))
 	})
 
 	It("reports a missing registry", func() {

@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -74,6 +75,15 @@ func main() {
 		"Name of the dockerconfigjson Secret, in each App's namespace, used to push and pull built images.")
 	flag.StringVar(&builderImage, "buildkit-image", "moby/buildkit:v0.23.2-rootless",
 		"Rootless BuildKit image that runs the build Jobs.")
+	var buildTimeout time.Duration
+	var maxBuilds int
+	var ingressNamespace string
+	flag.DurationVar(&buildTimeout, "build-timeout", controller.DefaultBuildTimeout,
+		"Stop a build Job that runs longer than this. 0 disables the limit.")
+	flag.IntVar(&maxBuilds, "max-builds", 2,
+		"How many builds may run at once in the whole cluster; the rest wait. 0 disables the limit.")
+	flag.StringVar(&ingressNamespace, "ingress-namespace", "kube-system",
+		"Namespace of the ingress controller; only its pods may connect to an App (k3s runs Traefik in kube-system).")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -199,14 +209,17 @@ func main() {
 	}
 
 	if err := (&controller.AppReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		Domain:         domain,
-		Recorder:       mgr.GetEventRecorder("app-controller"),
-		Registry:       registry,
-		RegistrySecret: registrySecret,
-		BuilderImage:   builderImage,
-		Resolver:       &gitrepo.HTTP{},
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		Domain:           domain,
+		Recorder:         mgr.GetEventRecorder("app-controller"),
+		Registry:         registry,
+		RegistrySecret:   registrySecret,
+		BuilderImage:     builderImage,
+		Resolver:         &gitrepo.HTTP{},
+		BuildTimeout:     buildTimeout,
+		MaxBuilds:        maxBuilds,
+		IngressNamespace: ingressNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")
 		os.Exit(1)

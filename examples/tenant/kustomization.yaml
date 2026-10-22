@@ -1,0 +1,14 @@
+# A team namespace for Platformator Apps: quota, defaults, and a role for the team.
+#
+#   kubectl apply -k examples/tenant
+#
+# Copy this directory and change `namespace` (and the group in rolebinding.yaml)
+# for each team. Apps of the team then go in that namespace.
+namespace: team-a
+
+resources:
+  - namespace.yaml
+  - resourcequota.yaml
+  - limitrange.yaml
+  - role.yaml
+  - rolebinding.yaml

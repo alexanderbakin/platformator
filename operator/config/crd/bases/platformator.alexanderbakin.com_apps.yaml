@@ -327,6 +327,17 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              network:
+                description: |-
+                  network adjusts who may connect to the App. By default only the ingress
+                  controller can.
+                properties:
+                  allowSameNamespace:
+                    description: |-
+                      allowSameNamespace lets every pod in the App's namespace connect to it,
+                      for example another App that calls this one through its Service.
+                    type: boolean
+                type: object
               port:
                 format: int32
                 maximum: 65535

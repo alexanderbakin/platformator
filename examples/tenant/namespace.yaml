@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    # Pod Security is only warned and audited, not enforced: the BuildKit pods
+    # that build Apps from Git run with seccomp and AppArmor unconfined, which
+    # the baseline profile forbids. See the threat model in the README.
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/audit: baseline

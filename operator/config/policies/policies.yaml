@@ -1,0 +1,48 @@
+# Needs Kubernetes 1.30 or newer (ValidatingAdmissionPolicy is GA there).
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: platformator-app-pinned-image
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [platformator.alexanderbakin.com]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [apps]
+  validations:
+    - expression: "!has(object.spec.image) || (object.spec.image.contains(':') && !object.spec.image.endsWith(':latest'))"
+      message: "spec.image must name a tag other than latest (or a digest), so a pod restart cannot pull different code"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: platformator-app-pinned-image
+spec:
+  policyName: platformator-app-pinned-image
+  validationActions: [Warn, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: platformator-app-replica-cap
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [platformator.alexanderbakin.com]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [apps]
+  validations:
+    - expression: "!has(object.spec.maxReplicas) || object.spec.maxReplicas <= 10"
+      message: "spec.maxReplicas may not be above 10 on this platform"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: platformator-app-replica-cap
+spec:
+  policyName: platformator-app-replica-cap
+  validationActions: [Warn, Audit]

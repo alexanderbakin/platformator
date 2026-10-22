@@ -1,0 +1,29 @@
+# What a team member can do in the team's namespace, and nothing outside it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-team
+rules:
+  - apiGroups: [platformator.alexanderbakin.com]
+    resources: [apps]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [platformator.alexanderbakin.com]
+    resources: [apps/status]
+    verbs: [get]
+  # Their own configuration and the registry credentials of their builds.
+  - apiGroups: [""]
+    resources: [secrets, configmaps]
+    verbs: [create, delete, get, list, patch, update]
+  # Enough to see why an App or a build is not working.
+  - apiGroups: [""]
+    resources: [pods, pods/log, events, services]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [get, list, watch]

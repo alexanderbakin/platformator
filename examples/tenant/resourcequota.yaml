@@ -1,0 +1,14 @@
+# Caps what the team can use in total. A running build Job counts too (it asks
+# for 250m CPU / 512Mi and may use 1 CPU / 1.5Gi).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    limits.cpu: "4"
+    limits.memory: 8Gi
+    count/apps.platformator.alexanderbakin.com: "10"

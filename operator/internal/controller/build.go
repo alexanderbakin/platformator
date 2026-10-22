@@ -25,6 +25,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -42,6 +43,12 @@ const (
 	buildRunning   = "Running"
 	buildSucceeded = "Succeeded"
 	buildFailed    = "Failed"
+
+	// buildQueued: the build waits for a free slot (--max-builds).
+	buildQueued = "Queued"
+	// buildBlocked: the build cannot start until something is fixed, today only
+	// a missing registry Secret. Unlike Failed, it is retried by itself.
+	buildBlocked = "Blocked"
 )
 
 // Names of the Built condition and its reasons.
@@ -52,6 +59,14 @@ const (
 	reasonBuildFailed      = "BuildFailed"
 	reasonBranchUnreadable = "BranchUnreadable"
 	reasonImageNotBuilt    = "ImageNotBuilt"
+	reasonBuildQueued      = "BuildQueued"
+	reasonSecretMissing    = "RegistrySecretMissing"
+
+	// buildRetryInterval is how often a queued or blocked build is looked at again.
+	buildRetryInterval = 15 * time.Second
+
+	// DefaultBuildTimeout is how long a build Job may run before it is stopped.
+	DefaultBuildTimeout = 15 * time.Minute
 
 	// buildPollInterval is how often the branch is checked for a new commit.
 	buildPollInterval = time.Minute
@@ -127,6 +142,10 @@ func (r *AppReconciler) reconcileBuild(ctx context.Context, app *platformatorv1a
 		// The Job was cleaned up after finishing; do not build the commit again.
 		return out, nil
 	default:
+		may, err := r.mayBuild(ctx, app, commit, &out)
+		if err != nil || !may {
+			return out, err
+		}
 		job = *r.buildJob(app, commit, image, jobName)
 		if err := controllerutil.SetControllerReference(app, &job, r.Scheme); err != nil {
 			return out, err
@@ -152,6 +171,81 @@ func (r *AppReconciler) reconcileBuild(ctx context.Context, app *platformatorv1a
 		status.Message = ""
 	}
 	return out, nil
+}
+
+// mayBuild decides whether a build Job can be created now. When it cannot, the
+// reason is recorded in status.build and the build is looked at again soon.
+func (r *AppReconciler) mayBuild(
+	ctx context.Context, app *platformatorv1alpha1.App, commit string, out *buildOutcome,
+) (bool, error) {
+	status := app.Status.Build
+	hold := func(state, message string) {
+		status.Commit = commit
+		status.JobName = ""
+		status.State = state
+		status.Message = message
+		out.requeue = buildRetryInterval
+	}
+
+	// A missing Secret would leave the build pod stuck in ContainerCreating
+	// with nothing on the App to say why, so check first.
+	exists, err := r.secretExists(ctx, app.Namespace, r.RegistrySecret)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		hold(buildBlocked, fmt.Sprintf(
+			"Secret %q not found in namespace %q. Create it: kubectl create secret docker-registry %s "+
+				"--docker-server=<registry host> --docker-username=<user> --docker-password=<token> -n %s",
+			r.RegistrySecret, app.Namespace, r.RegistrySecret, app.Namespace))
+		return false, nil
+	}
+
+	if r.MaxBuilds > 0 {
+		running, err := r.runningBuilds(ctx)
+		if err != nil {
+			return false, err
+		}
+		if running >= r.MaxBuilds {
+			hold(buildQueued, fmt.Sprintf("%d of %d concurrent builds are running", running, r.MaxBuilds))
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// secretExists reports whether a Secret exists. It reads metadata only, so no
+// Secret data is ever cached by the operator.
+func (r *AppReconciler) secretExists(ctx context.Context, namespace, name string) (bool, error) {
+	obj := &metav1.PartialObjectMetadata{}
+	obj.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind(kindSecret))
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, obj)
+	switch {
+	case err == nil:
+		return true, nil
+	case apierrors.IsNotFound(err):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// buildLabel marks the Jobs the operator creates for builds.
+const buildLabel = "platformator.alexanderbakin.com/build"
+
+// runningBuilds counts the build Jobs, in every namespace, that have not ended.
+func (r *AppReconciler) runningBuilds(ctx context.Context) (int, error) {
+	var jobs batchv1.JobList
+	if err := r.List(ctx, &jobs, client.MatchingLabels{buildLabel: "true"}); err != nil {
+		return 0, err
+	}
+	running := 0
+	for i := range jobs.Items {
+		if done, _ := jobFinished(&jobs.Items[i]); !done && jobs.Items[i].DeletionTimestamp.IsZero() {
+			running++
+		}
+	}
+	return running, nil
 }
 
 // jobFinished reports whether a Job has ended and, if so, whether it worked.
@@ -200,6 +294,14 @@ func buildCondition(app *platformatorv1alpha1.App) *metav1.Condition {
 		cond.Status = metav1.ConditionUnknown
 		cond.Reason = reasonBuildRunning
 		cond.Message = "Building " + shortCommit(b.Commit)
+	case buildQueued:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonBuildQueued
+		cond.Message = b.Message
+	case buildBlocked:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonSecretMissing
+		cond.Message = b.Message
 	default:
 		cond.Status = metav1.ConditionUnknown
 		cond.Reason = reasonBranchUnreadable
@@ -218,6 +320,27 @@ func shortCommit(commit string) string {
 // imageFor is the image a commit of the App is pushed to.
 func imageFor(registry string, app *platformatorv1alpha1.App, commit string) string {
 	return fmt.Sprintf("%s/%s-%s:%s", strings.TrimSuffix(registry, "/"), app.Namespace, app.Name, shortCommit(commit))
+}
+
+// cacheImageFor is the image BuildKit keeps its layer cache in, so the next
+// build of the App reuses the layers that did not change.
+func cacheImageFor(registry string, app *platformatorv1alpha1.App) string {
+	return fmt.Sprintf("%s/%s-%s:buildcache", strings.TrimSuffix(registry, "/"), app.Namespace, app.Name)
+}
+
+// buildResources are the requests and limits of a build pod. Without them a
+// ResourceQuota would refuse the pod, and one build could starve the node.
+func buildResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("250m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("1"),
+			corev1.ResourceMemory: resource.MustParse("1536Mi"),
+		},
+	}
 }
 
 // buildJobName names the Job of a commit. App names can be 63 characters long,
@@ -252,16 +375,22 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 	if dockerfile == "" {
 		dockerfile = "Dockerfile"
 	}
-	labels := map[string]string{"app": app.Name, "platformator.alexanderbakin.com/build": "true"}
+	labels := map[string]string{"app": app.Name, buildLabel: "true"}
 	zero := int32(0)
 	ttl := buildJobTTL
 	uid := int64(1000)
+	var deadline *int64
+	if r.BuildTimeout > 0 {
+		deadline = new(int64(r.BuildTimeout.Seconds()))
+	}
+	cache := cacheImageFor(r.Registry, app)
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: app.Namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &zero,
 			TTLSecondsAfterFinished: &ttl,
+			ActiveDeadlineSeconds:   deadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
@@ -276,11 +405,14 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 							"--opt", "context=" + gitContext(&src, commit),
 							"--opt", "filename=" + dockerfile,
 							"--output", "type=image,name=" + image + ",push=true",
+							"--import-cache", "type=registry,ref=" + cache,
+							"--export-cache", "type=registry,ref=" + cache + ",mode=max,oci-mediatypes=true,image-manifest=true",
 						},
 						Env: []corev1.EnvVar{
 							{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},
 							{Name: "DOCKER_CONFIG", Value: dockerConfigDir},
 						},
+						Resources: buildResources(),
 						SecurityContext: &corev1.SecurityContext{
 							RunAsUser:       &uid,
 							RunAsGroup:      &uid,

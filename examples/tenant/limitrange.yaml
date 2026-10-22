@@ -1,0 +1,18 @@
+# Defaults for pods that declare no resources, and a ceiling per container.
+# The ceiling must stay above the build pod's limits (1 CPU, 1.5Gi).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi
+      default:
+        cpu: 500m
+        memory: 256Mi
+      max:
+        cpu: "2"
+        memory: 2Gi

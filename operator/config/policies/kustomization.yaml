@@ -1,0 +1,7 @@
+# Optional admission policies for Apps. They are not part of the default
+# deployment:   kubectl apply -k config/policies
+#
+# Both start in Warn and Audit mode, so they only print a warning when an App
+# breaks them. To enforce, change validationActions to [Deny] in policies.yaml.
+resources:
+  - policies.yaml

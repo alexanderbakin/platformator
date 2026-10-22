@@ -90,6 +90,19 @@ type AppSpec struct {
 	// (no privilege escalation, the runtime's default seccomp profile).
 	// +optional
 	Security *Security `json:"security,omitempty"`
+
+	// network adjusts who may connect to the App. By default only the ingress
+	// controller can.
+	// +optional
+	Network *Network `json:"network,omitempty"`
+}
+
+// Network holds the options of the App's NetworkPolicy.
+type Network struct {
+	// allowSameNamespace lets every pod in the App's namespace connect to it,
+	// for example another App that calls this one through its Service.
+	// +optional
+	AllowSameNamespace bool `json:"allowSameNamespace,omitempty"`
 }
 
 // Security holds the hardening options that can break images, so they are
