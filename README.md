@@ -436,7 +436,7 @@ This is soft multi-tenancy for teams that trust each other, not isolation for ho
 | A build reaches other things in the cluster | Nothing in the build pod holds a cluster credential | Its egress is open, so it can connect to cluster services and the internet |
 | The registry token leaks | It lives in a per-namespace Secret, mounted only into the build container, not into the build steps | The token is a personal access token with broad scopes (see Design Decisions). Anyone who can read the Secret, or compromise BuildKit, gets it. One registry account holds all images, so that token can overwrite any tenant's image |
 | The operator is compromised | It reads only the metadata of Secrets and ConfigMaps | Its role can read every Secret and ConfigMap in the cluster (Kubernetes cannot grant metadata-only access) and create workloads everywhere |
-| One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik, quotas cap usage, the older App keeps a hostname | Egress is open, the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
+| One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik (if the CNI enforces it; k3s does, plain flannel would accept the policies and ignore them), quotas cap usage, the older App keeps a hostname | Egress is open, the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
 | Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by tag, not digest. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
 | Secrets at rest | None here | k3s stores Secrets unencrypted in its datastore unless encryption is switched on |
 
@@ -515,3 +515,5 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 14. [Day 14](https://lnkd.in/p/dfXV5UEX)
 15. [Day 15](https://lnkd.in/p/dMwxi4HZ)
 16. [Day 16](https://lnkd.in/p/dhNEFJTX)
+17. [Day 17](https://lnkd.in/p/dJNJHKXb)
+18. [Day 18](https://lnkd.in/p/dkgW987E)
