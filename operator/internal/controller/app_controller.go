@@ -187,6 +187,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			// update (conflict) does not announce the same change twice.
 			r.emitTransitionEvents(&app, previous, reconciled, ready, certCond)
 			r.emitBuildEvent(&app, previous, builtCond)
+			recordBuild(previous, builtCond, build.took)
 		}
 	}()
 
@@ -254,7 +255,7 @@ func (r *AppReconciler) conditionsFor(
 		ObservedGeneration: app.Generation,
 	}
 	ready = metav1.Condition{
-		Type:               "Ready",
+		Type:               conditionReady,
 		Status:             metav1.ConditionTrue,
 		Reason:             "DeploymentAvailable",
 		Message:            "Deployment is fully rolled out and available",

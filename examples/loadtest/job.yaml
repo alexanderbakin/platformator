@@ -1,0 +1,39 @@
+# Load for the HPA demo. It sends requests to an App through Traefik, the way
+# real traffic arrives (the App's NetworkPolicy only lets Traefik in), until
+# --max-time ends it. Replace HOST_PLACEHOLDER with the App's hostname:
+#
+#   sed "s/HOST_PLACEHOLDER/hello.$DOMAIN/" examples/loadtest/job.yaml | kubectl apply -f -
+#   kubectl delete job load   # stops it early
+#
+# curl keeps 50 transfers in flight over reused connections. --connect-to sends
+# them to the Traefik Service while the hostname stays the real one, so the
+# certificate and the route match.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load
+spec:
+  parallelism: 2
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: curl
+        image: curlimages/curl:8.11.1
+        command:
+        - sh
+        - -c
+        - >-
+          curl --parallel --parallel-max 50 --parallel-immediate --max-time 240 -s -o /dev/null
+          --connect-to HOST_PLACEHOLDER:443:traefik.kube-system.svc.cluster.local:443
+          "https://HOST_PLACEHOLDER/?[1-1000000]" || true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: "1"
+            memory: 128Mi

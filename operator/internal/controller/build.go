@@ -91,6 +91,8 @@ type buildOutcome struct {
 	image string
 	// requeue says when to look at the branch again. Zero means never.
 	requeue time.Duration
+	// took is how long the latest build Job ran, once it has ended.
+	took time.Duration
 }
 
 // reconcileBuild keeps the image of an App with spec.source up to date: it
@@ -163,9 +165,11 @@ func (r *AppReconciler) reconcileBuild(ctx context.Context, app *platformatorv1a
 		status.Message = ""
 		status.Image = image
 		out.image = image
+		out.took = jobDuration(&job)
 	case done:
 		status.State = buildFailed
 		status.Message = jobFailureMessage(&job)
+		out.took = jobDuration(&job)
 	default:
 		status.State = buildRunning
 		status.Message = ""

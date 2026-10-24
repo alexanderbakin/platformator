@@ -1,0 +1,24 @@
+# Tells Prometheus to scrape the operator's metrics Service over HTTPS, with its
+# own ServiceAccount token (the endpoint checks it).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: operator-controller-manager-metrics
+  namespace: operator-system
+  labels:
+    app.kubernetes.io/name: operator
+spec:
+  endpoints:
+  - path: /metrics
+    port: https
+    scheme: https
+    bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    tlsConfig:
+      # The operator serves a self-signed certificate it generates itself, and
+      # the scrape never leaves the cluster. With cert-manager certificates for
+      # the metrics server this could verify the server instead.
+      insecureSkipVerify: true
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: operator

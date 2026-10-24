@@ -184,6 +184,14 @@ deploy-image: manifests kustomize ## Deploy IMG to the cluster without modifying
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: deploy-monitoring
+deploy-monitoring: kustomize ## Let Prometheus scrape the operator and load the Platformator dashboard into Grafana (needs the monitoring stack).
+	"$(KUSTOMIZE)" build config/monitoring | "$(KUBECTL)" apply -f -
+
+.PHONY: undeploy-monitoring
+undeploy-monitoring: kustomize ## Remove what deploy-monitoring added. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUSTOMIZE)" build config/monitoring | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
 ##@ Dependencies
 
 ## Location to install dependencies to

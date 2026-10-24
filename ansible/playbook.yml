@@ -4,6 +4,7 @@
   vars:
     k3s_version: latest
     cert_manager_version: latest
+    kube_prometheus_stack_version: latest
   tasks:
     - name: Ensure k3s config directory exists
       ansible.builtin.file:
@@ -36,6 +37,11 @@
       ansible.builtin.template:
         src: cluster-issuer.yaml.j2
         dest: /var/lib/rancher/k3s/server/manifests/02-cluster-issuer.yaml
+
+    - name: Deploy the monitoring stack manifest
+      ansible.builtin.template:
+        src: monitoring.yaml.j2
+        dest: /var/lib/rancher/k3s/server/manifests/03-monitoring.yaml
 
     - name: Install k3s
       ansible.builtin.command: /tmp/k3s

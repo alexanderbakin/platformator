@@ -1,0 +1,58 @@
+# Prometheus and Grafana, installed by the Helm controller that ships with k3s.
+# Sized for one node: no Alertmanager yet, short retention, no volumes (the
+# data goes away with the node, like everything else here).
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: kube-prometheus-stack
+  namespace: kube-system
+spec:
+  repo: https://prometheus-community.github.io/helm-charts
+  chart: kube-prometheus-stack
+{% if kube_prometheus_stack_version != 'latest' %}
+  version: "{{ kube_prometheus_stack_version }}"
+{% endif %}
+  targetNamespace: monitoring
+  createNamespace: true
+  valuesContent: |-
+    alertmanager:
+      enabled: false
+
+    # k3s runs these inside one process and binds them to localhost, so their
+    # ServiceMonitors would only ever show as down targets.
+    kubeEtcd:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeControllerManager:
+      enabled: false
+    kubeProxy:
+      enabled: false
+
+    prometheus:
+      prometheusSpec:
+        retention: 3d
+        # Pick up every ServiceMonitor and rule in the cluster, not only the
+        # ones labelled with this Helm release. The operator's lives in its own
+        # namespace.
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorSelectorNilUsesHelmValues: false
+        ruleSelectorNilUsesHelmValues: false
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+
+    grafana:
+      # Dashboards are ConfigMaps labelled grafana_dashboard, from any namespace.
+      sidecar:
+        dashboards:
+          searchNamespace: ALL
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 512Mi

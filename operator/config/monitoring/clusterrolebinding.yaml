@@ -1,0 +1,14 @@
+# The operator's metrics endpoint requires the "get /metrics" permission.
+# operator-metrics-reader grants it; this gives it to Prometheus.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operator-metrics-reader-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: operator-metrics-reader
+subjects:
+- kind: ServiceAccount
+  name: kube-prometheus-stack-prometheus
+  namespace: monitoring

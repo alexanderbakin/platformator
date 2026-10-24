@@ -1,0 +1,23 @@
+# Optional. Apply it after the monitoring stack is installed (it needs the
+# ServiceMonitor CRD) and after the operator is deployed:
+#
+#   make deploy-monitoring
+#
+# It lets Prometheus scrape the operator and loads the Platformator dashboard
+# into Grafana.
+resources:
+- servicemonitor.yaml
+- clusterrolebinding.yaml
+
+# Grafana's sidecar loads every ConfigMap with the grafana_dashboard label. The
+# name is fixed (no hash suffix) so a changed dashboard replaces the old one.
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+- name: platformator-dashboard
+  namespace: monitoring
+  files:
+  - dashboards/platformator.json
+  options:
+    labels:
+      grafana_dashboard: "1"

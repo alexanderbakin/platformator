@@ -224,6 +224,7 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")
 		os.Exit(1)
 	}
+	controller.RegisterMetrics(mgr.GetClient())
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

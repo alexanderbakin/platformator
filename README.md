@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 18 of 30.
+Day 19 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -18,6 +18,7 @@ What the operator does today:
 - **Config reload and security:** pods restart by themselves when a Secret or ConfigMap they read changes, and every pod gets no privilege escalation and the default seccomp profile, with non-root, read-only filesystem and dropped capabilities available under `spec.security`. See [Configuration and Secrets](#configuration-and-secrets) and [Security defaults](#security-defaults).
 - **Isolation and build safety:** every App gets a NetworkPolicy that lets only the ingress controller in, an App whose hostname belongs to an older App in another namespace waits with `HostTaken`, a quota that refuses pods is reported on `Ready` as `ReplicaFailure`, and builds have a timeout, a concurrency limit and resource limits. See [Network isolation](#network-isolation), [Teams and quotas](#teams-and-quotas) and the [Threat model](#threat-model).
 - **Builds from Git:** instead of an `image`, an App can name a public repository. The operator watches the branch, builds the Dockerfile in the cluster with BuildKit, pushes to GHCR and rolls the Deployment to the new image. See [Building from Git](#building-from-git).
+- **Metrics and a dashboard:** besides the controller-runtime metrics, the operator exports `platformator_apps` (Apps by `Ready` status and reason), `platformator_app_builds` (latest build state), `platformator_builds_total` and `platformator_build_duration_seconds`. Prometheus and Grafana come with the node, and a dashboard in the repo shows the Apps, the builds, the operator and the autoscaling of one App. See [Observability](#observability).
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `operator.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
 
@@ -27,7 +28,7 @@ Three layers, each built by a different tool:
 
 ```
 Terraform  ->  AWS: EC2 instance, Route53 zone for the subdomain, state bucket
-Ansible    ->  the node: k3s (with Traefik), cert-manager, a Let's Encrypt ClusterIssuer
+Ansible    ->  the node: k3s (with Traefik), cert-manager, a Let's Encrypt ClusterIssuer, Prometheus and Grafana
 operator   ->  the platform: an App CRD and a controller that runs inside k3s
 ```
 
@@ -95,6 +96,10 @@ Each entry says what was chosen, why, and what it costs.
 **Polling Git instead of webhooks.** A webhook needs a public endpoint on the operator, a secret and per-provider setup. Polling works with any HTTPS Git host and nothing exposed. Cost: up to a minute of delay and one request per App per minute.
 
 **One node, on purpose.** The target is a single k3s node on AWS: cheap, easy to rebuild from Terraform and Ansible, and enough to show the platform. Cost: no high availability. The operator itself would not need to change to run on more nodes.
+
+**App metrics are computed when Prometheus scrapes, not kept as counters.** `platformator_apps` lists the Apps from the informer cache on every scrape. A gauge that the reconciler increments and decrements would drift on deletes and restarts, and would need cleanup of label sets that no longer exist. Cost: a list per scrape (15-30 seconds apart, from memory, so cheap). Build results are the opposite: they are events, so they are counters, incremented once when the `Built` condition changes, after the status is stored, like the Events.
+
+**Prometheus and Grafana come from the Helm controller k3s already has, and Grafana is not exposed.** A `HelmChart` manifest written by Ansible installs kube-prometheus-stack with Alertmanager and the control-plane scrapes off (k3s binds those to localhost), three days of retention and no volumes. Grafana is reached with `kubectl port-forward`, so no public endpoint, certificate or password policy is needed for a dashboard used by one person. Cost: the data is gone when the node is. That matches the rest of the setup, and it is why alert rules (Day 20) go in the repo too. The operator scrape uses `insecureSkipVerify`, because the operator's metrics certificate is self-signed and the traffic stays inside the cluster.
 
 **CI gates the image.** The operator image is published only after lint, unit tests and e2e on kind pass, so what lands on GHCR has been tested.
 
@@ -214,10 +219,10 @@ This installs and starts k3s, bootstraps cert-manager and a `letsencrypt` `Clust
 
 The `ClusterIssuer` uses the HTTP-01 challenge type against the k3s-bundled Traefik, so no DNS-provider API credentials are needed - port 80 is already open (see `terraform/main.tf`).
 
-By default both k3s and cert-manager install whatever's currently latest. To pin either for a reproducible provision:
+By default k3s, cert-manager and the monitoring stack (kube-prometheus-stack) install whatever's currently latest. To pin them for a reproducible provision:
 
 ```bash
-ansible-playbook playbook.yml -e k3s_version=v1.32.1+k3s1 -e cert_manager_version=v1.21.2
+ansible-playbook playbook.yml -e k3s_version=v1.32.1+k3s1 -e cert_manager_version=v1.21.2 -e kube_prometheus_stack_version=<chart version>
 ```
 
 ### Use kubectl
@@ -441,6 +446,40 @@ This is soft multi-tenancy for teams that trust each other, not isolation for ho
 | Secrets at rest | None here | k3s stores Secrets unencrypted in its datastore unless encryption is switched on |
 
 Out of scope: denial of service beyond quotas and the build limits, and tenants who are actively hostile. For those, builds would need to run in a separate cluster or a VM-based sandbox.
+
+### Observability
+
+The playbook installs Prometheus and Grafana into the `monitoring` namespace (`kubectl get pods -n monitoring`; the first start takes a few minutes while the Helm controller pulls the chart). Once the operator is deployed, let Prometheus scrape it and load the dashboard:
+
+```bash
+cd operator
+make deploy-monitoring
+```
+
+This applies `config/monitoring`: a ServiceMonitor for the operator's metrics Service, permission for Prometheus to read `/metrics`, and the Platformator dashboard as a ConfigMap that Grafana's sidecar picks up. Open Grafana through a port-forward:
+
+```bash
+kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
+# http://localhost:3000, user admin, dashboard "Platformator"
+```
+
+What the operator exports, on top of the controller-runtime metrics (`controller_runtime_reconcile_total`, `workqueue_depth` and others):
+
+| Metric | Meaning |
+|---|---|
+| `platformator_apps{ready,reason}` | Apps by the status and reason of their `Ready` condition |
+| `platformator_app_builds{state}` | Apps built from Git by the state of their latest build |
+| `platformator_builds_total{result}` | Finished builds, `succeeded` or `failed` |
+| `platformator_build_duration_seconds` | Histogram of how long finished builds took |
+
+To see autoscaling, send load to an App through Traefik (the App's NetworkPolicy only admits Traefik, so a pod in the same namespace cannot do it) and watch the Replicas and CPU panels:
+
+```bash
+sed "s/HOST_PLACEHOLDER/hello.$DOMAIN/" examples/loadtest/job.yaml | kubectl apply -f -
+kubectl get hpa hello -w
+kubectl delete job load   # stops it early; it ends by itself after four minutes
+```
 
 ### Rolling back
 
