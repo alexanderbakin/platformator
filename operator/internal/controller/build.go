@@ -237,6 +237,12 @@ func (r *AppReconciler) secretExists(ctx context.Context, namespace, name string
 // buildLabel marks the Jobs the operator creates for builds.
 const buildLabel = "platformator.alexanderbakin.com/build"
 
+// buildOfLabel names the App a build belongs to. It must not be the "app" label:
+// the Deployment, Service, NetworkPolicy and HPA of an App select pods by
+// app=<name>, and a finished build pod with that label is counted by the HPA as
+// a pod without metrics, which stops it from scaling up.
+const buildOfLabel = "platformator.alexanderbakin.com/build-of"
+
 // runningBuilds counts the build Jobs, in every namespace, that have not ended.
 func (r *AppReconciler) runningBuilds(ctx context.Context) (int, error) {
 	var jobs batchv1.JobList
@@ -379,7 +385,7 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 	if dockerfile == "" {
 		dockerfile = "Dockerfile"
 	}
-	labels := map[string]string{"app": app.Name, buildLabel: "true"}
+	labels := map[string]string{buildOfLabel: app.Name, buildLabel: "true"}
 	zero := int32(0)
 	ttl := buildJobTTL
 	uid := int64(1000)
