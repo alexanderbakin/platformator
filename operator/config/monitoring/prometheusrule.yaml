@@ -54,9 +54,17 @@ spec:
         summary: A Git build failed in the last hour
         description: kubectl get jobs, then kubectl logs on the build Job's Pod. The build state is also in the App's status.build.
     - alert: PlatformatorAppAtMaxReplicas
+      # Only for autoscalers that can scale: min equal to max is a fixed size.
       expr: |
-        kube_horizontalpodautoscaler_status_current_replicas
-          >= kube_horizontalpodautoscaler_spec_max_replicas
+        (
+          kube_horizontalpodautoscaler_status_current_replicas
+            >= kube_horizontalpodautoscaler_spec_max_replicas
+        )
+        and on (namespace, horizontalpodautoscaler)
+        (
+          kube_horizontalpodautoscaler_spec_max_replicas
+            > kube_horizontalpodautoscaler_spec_min_replicas
+        )
       for: 15m
       labels:
         severity: info

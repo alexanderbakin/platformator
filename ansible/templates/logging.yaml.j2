@@ -38,6 +38,15 @@ spec:
       replicas: 1
       persistence:
         enabled: false
+      # The chart mounts no writable volume at /var/loki when persistence is
+      # off, and the root filesystem is read-only, so Loki cannot create its
+      # data directories. An emptyDir gives it one (lost with the Pod).
+      extraVolumes:
+      - name: data
+        emptyDir: {}
+      extraVolumeMounts:
+      - name: data
+        mountPath: /var/loki
       resources:
         requests:
           cpu: 100m
