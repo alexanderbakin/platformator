@@ -56,6 +56,10 @@ type AppReconciler struct {
 	Registry       string
 	RegistrySecret string
 
+	// RegistryInsecure makes builds push over plain HTTP, for a registry inside
+	// the cluster (the e2e tests use one). Layer caching is switched off then.
+	RegistryInsecure bool
+
 	// BuilderImage is the rootless BuildKit image that runs build Jobs.
 	BuilderImage string
 

@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 19 of 30.
+Day 20 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -18,7 +18,7 @@ What the operator does today:
 - **Config reload and security:** pods restart by themselves when a Secret or ConfigMap they read changes, and every pod gets no privilege escalation and the default seccomp profile, with non-root, read-only filesystem and dropped capabilities available under `spec.security`. See [Configuration and Secrets](#configuration-and-secrets) and [Security defaults](#security-defaults).
 - **Isolation and build safety:** every App gets a NetworkPolicy that lets only the ingress controller in, an App whose hostname belongs to an older App in another namespace waits with `HostTaken`, a quota that refuses pods is reported on `Ready` as `ReplicaFailure`, and builds have a timeout, a concurrency limit and resource limits. See [Network isolation](#network-isolation), [Teams and quotas](#teams-and-quotas) and the [Threat model](#threat-model).
 - **Builds from Git:** instead of an `image`, an App can name a public repository. The operator watches the branch, builds the Dockerfile in the cluster with BuildKit, pushes to GHCR and rolls the Deployment to the new image. See [Building from Git](#building-from-git).
-- **Metrics and a dashboard:** besides the controller-runtime metrics, the operator exports `platformator_apps` (Apps by `Ready` status and reason), `platformator_app_builds` (latest build state), `platformator_builds_total` and `platformator_build_duration_seconds`. Prometheus and Grafana come with the node, and a dashboard in the repo shows the Apps, the builds, the operator and the autoscaling of one App. See [Observability](#observability).
+- **Metrics and a dashboard:** besides the controller-runtime metrics, the operator exports `platformator_apps` (Apps by `Ready` status and reason), `platformator_app_builds` (latest build state), `platformator_builds_total` and `platformator_build_duration_seconds`. Prometheus, Grafana, Loki and Alloy come with the node. A dashboard in the repo shows the Apps, the builds, the operator, the autoscaling and the logs of one App, and alert rules cover the operator, the builds and the Apps. See [Observability](#observability).
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `operator.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
 
@@ -28,7 +28,7 @@ Three layers, each built by a different tool:
 
 ```
 Terraform  ->  AWS: EC2 instance, Route53 zone for the subdomain, state bucket
-Ansible    ->  the node: k3s (with Traefik), cert-manager, a Let's Encrypt ClusterIssuer, Prometheus and Grafana
+Ansible    ->  the node: k3s (with Traefik), cert-manager, a Let's Encrypt ClusterIssuer, Prometheus, Grafana and Loki
 operator   ->  the platform: an App CRD and a controller that runs inside k3s
 ```
 
@@ -100,6 +100,12 @@ Each entry says what was chosen, why, and what it costs.
 **App metrics are computed when Prometheus scrapes, not kept as counters.** `platformator_apps` lists the Apps from the informer cache on every scrape. A gauge that the reconciler increments and decrements would drift on deletes and restarts, and would need cleanup of label sets that no longer exist. Cost: a list per scrape (15-30 seconds apart, from memory, so cheap). Build results are the opposite: they are events, so they are counters, incremented once when the `Built` condition changes, after the status is stored, like the Events.
 
 **Prometheus and Grafana come from the Helm controller k3s already has, and Grafana is not exposed.** A `HelmChart` manifest written by Ansible installs kube-prometheus-stack with Alertmanager and the control-plane scrapes off (k3s binds those to localhost), three days of retention and no volumes. Grafana is reached with `kubectl port-forward`, so no public endpoint, certificate or password policy is needed for a dashboard used by one person. Cost: the data is gone when the node is. That matches the rest of the setup, and it is why alert rules (Day 20) go in the repo too. The operator scrape uses `insecureSkipVerify`, because the operator's metrics certificate is self-signed and the traffic stays inside the cluster.
+
+**Alerts are rules in the repo, without Alertmanager.** A `PrometheusRule` holds six alerts that each point at a thing to do. Nothing is sent: on a demo cluster that is up for a few hours, a notification channel would be more setup than signal, and the state is one click away in Prometheus and on the dashboard. Cost: nobody is told when something is wrong. Adding Alertmanager later is a chart value and a receiver, the rules would not change.
+
+**Logs go to Loki through Alloy, with no host access.** Alloy reads logs from the Kubernetes API, so it needs no hostPath mounts and no privileged DaemonSet, and a single replica is enough for one node. Loki runs as one binary on the filesystem without a volume. Cost: logs die with the Pod, and tailing through the API does not scale to a large cluster. Both are fine here and would change first if the cluster grew.
+
+**The Git build test is separate from the gating e2e.** It exercises the whole path (resolve the head, run rootless BuildKit, push) against a registry in the cluster, which the unit tests cannot. It depends on user namespaces on the runner and on Docker Hub, so a failure there says little about the operator and it must not block publishing an image. Cost: a regression in the build path can reach main before this test notices.
 
 **CI gates the image.** The operator image is published only after lint, unit tests and e2e on kind pass, so what lands on GHCR has been tested.
 
@@ -456,7 +462,7 @@ cd operator
 make deploy-monitoring
 ```
 
-This applies `config/monitoring`: a ServiceMonitor for the operator's metrics Service, permission for Prometheus to read `/metrics`, and the Platformator dashboard as a ConfigMap that Grafana's sidecar picks up. Open Grafana through a port-forward:
+This applies `config/monitoring`: a ServiceMonitor for the operator's metrics Service, permission for Prometheus to read `/metrics`, the alert rules, and the Platformator dashboard as a ConfigMap that Grafana's sidecar picks up. Open Grafana through a port-forward:
 
 ```bash
 kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
@@ -472,6 +478,19 @@ What the operator exports, on top of the controller-runtime metrics (`controller
 | `platformator_app_builds{state}` | Apps built from Git by the state of their latest build |
 | `platformator_builds_total{result}` | Finished builds, `succeeded` or `failed` |
 | `platformator_build_duration_seconds` | Histogram of how long finished builds took |
+
+**Alerts.** `config/monitoring/prometheusrule.yaml` defines these rules. There is no Alertmanager, so they are visible, not delivered: in Prometheus under Alerts, and in the dashboard's alerts table.
+
+| Alert | Fires when |
+|---|---|
+| `PlatformatorOperatorDown` | Prometheus has not scraped the operator for 5 minutes |
+| `PlatformatorReconcileErrors` | The App controller returns errors for 10 minutes |
+| `PlatformatorAppNotReady` | An App has been not Ready for 10 minutes, rollouts in progress excluded |
+| `PlatformatorAppRefusedByQuota` | An App is stuck on `ReplicaFailure` for 5 minutes |
+| `PlatformatorBuildFailed` | A Git build failed in the last hour |
+| `PlatformatorAppAtMaxReplicas` | An autoscaler has been at its maximum for 15 minutes |
+
+**Logs.** Alloy tails every Pod through the Kubernetes API and ships the lines to Loki, labelled with `namespace`, `pod`, `container` and `app`. A build Pod gets the `app` label of the App it builds, so one query shows an App's logs and its builds' logs. The dashboard's last rows follow the selected App and the operator; the same data is under Explore, data source Loki. Loki keeps its data in the Pod, so logs are gone when the Pod restarts.
 
 To see autoscaling, send load to an App through Traefik (the App's NetworkPolicy only admits Traefik, so a pod in the same namespace cannot do it) and watch the Replicas and CPU panels:
 
@@ -532,9 +551,12 @@ cd operator
 make test       # controller tests against a real API server (envtest)
 make lint
 make test-e2e   # needs Docker: creates a kind cluster, runs the real operator in it, deletes it
+make test-e2e-build   # the one e2e spec that builds an image from Git, see below
 ```
 
-The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `operator.env.example` into place first, since the real settings file is gitignored.
+The first three run in GitHub Actions (`.github/workflows`). The e2e job copies `operator.env.example` into place first, since the real settings file is gitignored.
+
+The Git build spec starts a registry inside the kind cluster, points the operator at it (`REGISTRY_INSECURE=true` makes build Jobs push over plain HTTP and skip the registry cache), creates an App from this repository's `examples/hello` and waits for the image, tagged with the commit, to appear in the registry. It needs unprivileged user namespaces on the host and Docker Hub for the base image, so it has its own workflow (`test-e2e-build.yml`) that does not gate publishing the image.
 
 ## Posts
 
@@ -556,3 +578,4 @@ The same three run in GitHub Actions (`.github/workflows`). The e2e job copies `
 16. [Day 16](https://lnkd.in/p/dhNEFJTX)
 17. [Day 17](https://lnkd.in/p/dJNJHKXb)
 18. [Day 18](https://lnkd.in/p/dkgW987E)
+19. [Day 19](https://lnkd.in/p/deSZWa5n)

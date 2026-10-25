@@ -46,6 +46,14 @@ spec:
             memory: 1Gi
 
     grafana:
+      # Logs come from Loki (see logging.yaml.j2). The fixed uid is what the
+      # dashboard refers to.
+      additionalDataSources:
+      - name: Loki
+        type: loki
+        uid: loki
+        access: proxy
+        url: http://loki.monitoring.svc:3100
       # Dashboards are ConfigMaps labelled grafana_dashboard, from any namespace.
       sidecar:
         dashboards:

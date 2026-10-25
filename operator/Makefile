@@ -86,8 +86,13 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 	esac
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests, except the one that builds from Git. Expected an isolated environment using Kind.
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter='!git-build'
+	$(MAKE) cleanup-test-e2e
+
+.PHONY: test-e2e-build
+test-e2e-build: setup-test-e2e manifests generate fmt vet ## Run only the e2e test that builds an image from Git (rootless BuildKit, needs the network).
+	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter='git-build' -timeout 25m
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

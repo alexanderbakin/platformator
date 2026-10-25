@@ -3,11 +3,12 @@
 #
 #   make deploy-monitoring
 #
-# It lets Prometheus scrape the operator and loads the Platformator dashboard
-# into Grafana.
+# It lets Prometheus scrape the operator, adds the alert rules and loads the
+# Platformator dashboard into Grafana.
 resources:
 - servicemonitor.yaml
 - clusterrolebinding.yaml
+- prometheusrule.yaml
 
 # Grafana's sidecar loads every ConfigMap with the grafana_dashboard label. The
 # name is fixed (no hash suffix) so a changed dashboard replaces the old one.

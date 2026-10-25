@@ -1,0 +1,134 @@
+# Logs: Loki (single binary, filesystem, no volume) and Grafana Alloy, which
+# tails every Pod through the Kubernetes API (no host mounts needed). Grafana
+# reads Loki as a data source, see monitoring.yaml.j2. Like the metrics, the
+# logs go away with the node.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: loki
+  namespace: kube-system
+spec:
+  repo: https://grafana.github.io/helm-charts
+  chart: loki
+{% if loki_version != 'latest' %}
+  version: "{{ loki_version }}"
+{% endif %}
+  targetNamespace: monitoring
+  createNamespace: true
+  valuesContent: |-
+    deploymentMode: SingleBinary
+    loki:
+      auth_enabled: false
+      commonConfig:
+        replication_factor: 1
+      storage:
+        type: filesystem
+      schemaConfig:
+        configs:
+        - from: "2024-04-01"
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+      pattern_ingester:
+        enabled: false
+    singleBinary:
+      replicas: 1
+      persistence:
+        enabled: false
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 512Mi
+    read:
+      replicas: 0
+    write:
+      replicas: 0
+    backend:
+      replicas: 0
+    gateway:
+      enabled: false
+    chunksCache:
+      enabled: false
+    resultsCache:
+      enabled: false
+    minio:
+      enabled: false
+    lokiCanary:
+      enabled: false
+    test:
+      enabled: false
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: alloy
+  namespace: kube-system
+spec:
+  repo: https://grafana.github.io/helm-charts
+  chart: alloy
+{% if alloy_version != 'latest' %}
+  version: "{{ alloy_version }}"
+{% endif %}
+  targetNamespace: monitoring
+  createNamespace: true
+  valuesContent: |-
+    controller:
+      type: deployment
+      replicas: 1
+    alloy:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+      configMap:
+        content: |-
+          discovery.kubernetes "pods" {
+            role = "pod"
+          }
+
+          // Labels for finding logs: the namespace, the Pod and the App. A build
+          // Pod belongs to an App through its build-of label, so the build logs
+          // show up next to the App's own.
+          discovery.relabel "pods" {
+            targets = discovery.kubernetes.pods.targets
+            rule {
+              source_labels = ["__meta_kubernetes_namespace"]
+              target_label  = "namespace"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_name"]
+              target_label  = "pod"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_container_name"]
+              target_label  = "container"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_app"]
+              regex         = "(.+)"
+              target_label  = "app"
+            }
+            rule {
+              source_labels = ["__meta_kubernetes_pod_label_platformator_alexanderbakin_com_build_of"]
+              regex         = "(.+)"
+              target_label  = "app"
+            }
+          }
+
+          loki.source.kubernetes "pods" {
+            targets    = discovery.relabel.pods.output
+            forward_to = [loki.write.default.receiver]
+          }
+
+          loki.write "default" {
+            endpoint {
+              url = "http://loki.monitoring.svc:3100/loki/api/v1/push"
+            }
+          }

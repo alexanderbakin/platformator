@@ -393,7 +393,27 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 	if r.BuildTimeout > 0 {
 		deadline = new(int64(r.BuildTimeout.Seconds()))
 	}
-	cache := cacheImageFor(r.Registry, app)
+
+	args := []string{
+		"build",
+		"--frontend", "dockerfile.v0",
+		"--opt", "context=" + gitContext(&src, commit),
+		"--opt", "filename=" + dockerfile,
+	}
+	output := "type=image,name=" + image + ",push=true"
+	if r.RegistryInsecure {
+		// A local HTTP registry. BuildKit takes the insecure flag per output; for
+		// the cache it would need a daemon config file, so the cache is skipped.
+		output += ",registry.insecure=true"
+		args = append(args, "--output", output)
+	} else {
+		cache := cacheImageFor(r.Registry, app)
+		args = append(args,
+			"--output", output,
+			"--import-cache", "type=registry,ref="+cache,
+			"--export-cache", "type=registry,ref="+cache+",mode=max,oci-mediatypes=true,image-manifest=true",
+		)
+	}
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: app.Namespace, Labels: labels},
@@ -409,15 +429,7 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 						Name:    buildkitName,
 						Image:   r.BuilderImage,
 						Command: []string{"buildctl-daemonless.sh"},
-						Args: []string{
-							"build",
-							"--frontend", "dockerfile.v0",
-							"--opt", "context=" + gitContext(&src, commit),
-							"--opt", "filename=" + dockerfile,
-							"--output", "type=image,name=" + image + ",push=true",
-							"--import-cache", "type=registry,ref=" + cache,
-							"--export-cache", "type=registry,ref=" + cache + ",mode=max,oci-mediatypes=true,image-manifest=true",
-						},
+						Args:    args,
 						Env: []corev1.EnvVar{
 							{Name: "BUILDKITD_FLAGS", Value: "--oci-worker-no-process-sandbox"},
 							{Name: "DOCKER_CONFIG", Value: dockerConfigDir},

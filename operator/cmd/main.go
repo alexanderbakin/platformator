@@ -71,6 +71,10 @@ func main() {
 	var registry, registrySecret, builderImage string
 	flag.StringVar(&registry, "registry", os.Getenv("REGISTRY"), "Registry path images built from Git are pushed to, "+
 		"e.g. ghcr.io/alexanderbakin. Falls back to the REGISTRY env var. Without it, spec.source is rejected.")
+	var registryInsecure bool
+	flag.BoolVar(&registryInsecure, "registry-insecure", os.Getenv("REGISTRY_INSECURE") == "true",
+		"Push built images over plain HTTP, for a registry inside the cluster. Falls back to the REGISTRY_INSECURE "+
+			"env var. Layer caching is off in this mode. Do not use it for a registry on a network.")
 	flag.StringVar(&registrySecret, "registry-secret", "registry-credentials",
 		"Name of the dockerconfigjson Secret, in each App's namespace, used to push and pull built images.")
 	flag.StringVar(&builderImage, "buildkit-image", "moby/buildkit:v0.23.2-rootless",
@@ -215,6 +219,7 @@ func main() {
 		Recorder:         mgr.GetEventRecorder("app-controller"),
 		Registry:         registry,
 		RegistrySecret:   registrySecret,
+		RegistryInsecure: registryInsecure,
 		BuilderImage:     builderImage,
 		Resolver:         &gitrepo.HTTP{},
 		BuildTimeout:     buildTimeout,

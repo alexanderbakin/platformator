@@ -5,6 +5,8 @@
     k3s_version: latest
     cert_manager_version: latest
     kube_prometheus_stack_version: latest
+    loki_version: latest
+    alloy_version: latest
   tasks:
     - name: Ensure k3s config directory exists
       ansible.builtin.file:
@@ -42,6 +44,11 @@
       ansible.builtin.template:
         src: monitoring.yaml.j2
         dest: /var/lib/rancher/k3s/server/manifests/03-monitoring.yaml
+
+    - name: Deploy the logging manifest (Loki and Alloy)
+      ansible.builtin.template:
+        src: logging.yaml.j2
+        dest: /var/lib/rancher/k3s/server/manifests/04-logging.yaml
 
     - name: Install k3s
       ansible.builtin.command: /tmp/k3s

@@ -643,6 +643,74 @@ spec:
 				g.Expect(field("message")).To(ContainSubstring("quota"))
 			}).WithTimeout(2 * time.Minute).Should(Succeed())
 		})
+
+		// This spec builds an image from the repository itself with rootless
+		// BuildKit, which needs unprivileged user namespaces on the node, and
+		// pulls base images from Docker Hub. That makes it slower and less
+		// predictable than the rest, so "make test-e2e" skips it and
+		// "make test-e2e-build" runs it. It stays last because it changes the
+		// operator's configuration.
+		It("should build an image from Git and push it to the registry", Label("git-build"), func() {
+			const (
+				name  = "e2e-git"
+				image = "default-" + name
+			)
+
+			By("running a registry in the cluster, reachable over plain HTTP")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(inClusterRegistry)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the registry")
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "deployment/registry", "service/registry",
+					"secret/registry-credentials", "-n", appNamespace, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			cmd = exec.Command("kubectl", "rollout", "status", "deployment/registry",
+				"-n", appNamespace, "--timeout=3m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "The registry did not start")
+
+			By("creating the registry Secret the build Job mounts (this registry needs no login)")
+			cmd = exec.Command("kubectl", "create", "secret", "docker-registry", "registry-credentials",
+				"--docker-server="+inClusterRegistryHost, "--docker-username=e2e", "--docker-password=e2e",
+				"-n", appNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the registry Secret")
+
+			By("pointing the operator at that registry")
+			cmd = exec.Command("kubectl", "set", "env", "deployment/operator-controller-manager",
+				"-n", namespace, "REGISTRY="+inClusterRegistryHost, "REGISTRY_INSECURE=true")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to configure the operator")
+
+			cmd = exec.Command("kubectl", "rollout", "status", "deployment/operator-controller-manager",
+				"-n", namespace, "--timeout=3m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "The operator did not restart")
+
+			By("creating an App that builds the examples/hello directory from Git")
+			applyAppManifest(name, gitAppManifest(name))
+
+			By("waiting for the build to succeed")
+			Eventually(func(g Gomega) {
+				status, err := appConditionStatus(name, "Built")
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(status).To(Equal("True"), "build state: %s", buildState(name))
+			}).WithTimeout(10 * time.Minute).WithPolling(10 * time.Second).Should(Succeed())
+
+			By("finding the image, tagged with the commit, in the registry")
+			commit, err := appStatusField(name, "build.commit")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(commit).To(HaveLen(40), "status.build.commit should be a full commit hash")
+
+			cmd = exec.Command("kubectl", "exec", "deployment/registry", "-n", appNamespace, "--",
+				"wget", "-qO-", "http://localhost:5000/v2/"+image+"/tags/list")
+			out, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to list the tags")
+			Expect(out).To(ContainSubstring(commit[:12]))
+		})
 	})
 })
 
@@ -843,4 +911,76 @@ func restoreKustomization() {
 	}
 	err := os.WriteFile(kustomizationPath, kustomizationBackup, os.FileMode(0o644))
 	Expect(err).NotTo(HaveOccurred())
+}
+
+// inClusterRegistryHost is where the build Job reaches the registry the
+// git-build spec runs, through the cluster's DNS.
+const inClusterRegistryHost = "registry.default.svc:5000"
+
+// inClusterRegistry runs the registry image as a Deployment with a Service.
+const inClusterRegistry = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+      - name: registry
+        image: registry:2
+        ports:
+        - containerPort: 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: default
+spec:
+  selector:
+    app: registry
+  ports:
+  - port: 5000
+    targetPort: 5000
+`
+
+// gitAppManifest is an App that builds examples/hello from this repository.
+func gitAppManifest(name string) string {
+	return fmt.Sprintf(`apiVersion: platformator.alexanderbakin.com/v1alpha1
+kind: App
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  source:
+    git:
+      url: https://github.com/alexanderbakin/platformator
+      path: examples/hello
+  port: 80
+  minReplicas: 1
+  maxReplicas: 1
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "50M"
+    limits:
+      cpu: "100m"
+      memory: "100M"
+`, name, appNamespace)
+}
+
+// buildState returns the state and message of an App's latest build, for the
+// failure message of a spec that waits for it.
+func buildState(name string) string {
+	state, _ := appStatusField(name, "build.state")
+	message, _ := appStatusField(name, "build.message")
+	return state + " " + message
 }

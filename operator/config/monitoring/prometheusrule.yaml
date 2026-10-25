@@ -1,0 +1,65 @@
+# Alert rules for Platformator. There is no Alertmanager in this stack, so they
+# show up in Prometheus (Alerts) and Grafana (Alerting > Alert rules) as
+# firing or pending, and nothing is sent anywhere.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platformator
+  namespace: operator-system
+  labels:
+    app.kubernetes.io/name: operator
+spec:
+  groups:
+  - name: platformator.operator
+    rules:
+    - alert: PlatformatorOperatorDown
+      expr: absent(up{job="operator-controller-manager-metrics-service"} == 1)
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: The operator is not being scraped
+        description: No App is reconciled while the operator is down. Check the controller-manager pod in operator-system.
+    - alert: PlatformatorReconcileErrors
+      expr: sum(rate(controller_runtime_reconcile_errors_total{controller="app"}[5m])) > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: The operator keeps failing to reconcile Apps
+        description: Reconcile errors for 10 minutes. See the operator logs, and the Ready condition of the Apps.
+  - name: platformator.apps
+    rules:
+    - alert: PlatformatorAppNotReady
+      expr: sum by (reason) (platformator_apps{ready!="True", reason!="RolloutInProgress"}) > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "{{ $value }} App(s) not Ready, reason {{ $labels.reason }}"
+        description: Run kubectl get apps -A, then kubectl describe on the one that is not Ready.
+    - alert: PlatformatorAppRefusedByQuota
+      expr: sum(platformator_apps{reason="ReplicaFailure"}) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: A tenant's quota or admission rules keep Pods from being created
+        description: The ReplicaFailure reason usually means a ResourceQuota or LimitRange. Check the events in the App's namespace.
+    - alert: PlatformatorBuildFailed
+      expr: increase(platformator_builds_total{result="failed"}[1h]) > 0
+      labels:
+        severity: warning
+      annotations:
+        summary: A Git build failed in the last hour
+        description: kubectl get jobs, then kubectl logs on the build Job's Pod. The build state is also in the App's status.build.
+    - alert: PlatformatorAppAtMaxReplicas
+      expr: |
+        kube_horizontalpodautoscaler_status_current_replicas
+          >= kube_horizontalpodautoscaler_spec_max_replicas
+      for: 15m
+      labels:
+        severity: info
+      annotations:
+        summary: "{{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} has been at its maximum replicas for 15 minutes"
+        description: The autoscaler cannot add more Pods. Raise autoscaling.maxReplicas if the load is real.

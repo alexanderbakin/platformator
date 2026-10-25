@@ -1,0 +1,61 @@
+name: E2E Build Test
+
+# Builds an image from Git inside a kind cluster with rootless BuildKit. It runs
+# next to the main checks and does not gate publishing: it depends on user
+# namespaces on the runner and on Docker Hub, so a red run says to look, not
+# that the operator is broken. Run it by hand with "Run workflow", or locally
+# with "make test-e2e-build".
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "operator/**"
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions: {}
+
+jobs:
+  test-e2e-build:
+    permissions:
+      contents: read
+    name: Build from Git on Ubuntu
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: operator
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: Install the latest version of kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-$(go env GOARCH)
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      # Ubuntu 24.04 runners stop unprivileged processes from creating user
+      # namespaces, which rootless BuildKit needs inside the build Pod.
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+
+      - name: Create operator.env from the example
+        run: cp config/default/operator.env.example config/default/operator.env
+
+      - name: Running the build test
+        run: |
+          go mod tidy
+          make test-e2e-build
