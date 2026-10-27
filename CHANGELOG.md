@@ -3,7 +3,7 @@
 Notable changes to Platformator. The operator image is tagged `vX.Y.Z` on a
 release and `<latest tag>-build.<N>` on every other push to `main`.
 
-## Unreleased (to be tagged v0.9.0)
+## 0.9.0 - 2026-10-27
 
 ### Added
 - Rebuilds of an App's pods when a Secret or ConfigMap it reads changes, with a revision annotation on the pod template.
