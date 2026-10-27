@@ -45,6 +45,17 @@ jobs:
       - name: Run linter
         run: make lint
 
+      # Standard library findings depend on the Go version that runs the check.
+      # go.mod pins the minimum (the linter uses it), but the image is built with
+      # the latest patch of the same release (the Dockerfile's golang:1.26), so
+      # check against that.
+      - name: Setup Go (latest patch)
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: "1.26"
+          check-latest: true
+          cache: false
+
       # Fails when the code calls a function with a known vulnerability, in this
       # module or in a dependency or the standard library. It reports only what
       # is reachable, so it is quieter than a scan of go.mod alone.
