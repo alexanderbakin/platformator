@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 20 of 30.
+Day 21 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -106,6 +106,10 @@ Each entry says what was chosen, why, and what it costs.
 **Logs go to Loki through Alloy, with no host access.** Alloy reads logs from the Kubernetes API, so it needs no hostPath mounts and no privileged DaemonSet, and a single replica is enough for one node. Loki runs as one binary on the filesystem without a volume. Cost: logs die with the Pod, lines written while Loki is down are dropped (Alloy retries briefly, then gives up, and tails only new lines once Loki is back), and tailing through the API does not scale to a large cluster. Both are fine here and would change first if the cluster grew.
 
 **The Git build test is separate from the gating e2e.** It exercises the whole path (resolve the head, run rootless BuildKit, push) against a registry in the cluster, which the unit tests cannot. It depends on user namespaces on the runner and on Docker Hub, so a failure there says little about the operator and it must not block publishing an image. Cost: a regression in the build path can reach main before this test notices.
+
+**The operator gets only the permissions it calls.** The role was the Kubebuilder default, full verbs on everything. I went through the code instead: children are made and changed with `CreateOrUpdate` and removed by the garbage collector through their owner reference, so there is no `delete` and no `patch`; Apps are read and only their status is written; Jobs are created and watched, never changed. What remains is `get`, `list`, `watch`, `create` and `update` on the children, `update` on `apps/status`, and read access to Secrets and ConfigMaps in every namespace, because an App can point at one anywhere. RBAC cannot limit that read to metadata, so the operator asks for metadata only, but the permission is still broad. A bug that needs a verb the role no longer has fails loudly, and the e2e suite runs with the real role.
+
+**The image is scanned after it is pushed, and a signature means it passed.** Scanning before the push would need the image built and loaded twice. Instead the multi-architecture image is pushed, scanned, and signed by digest only if the scan passes, so the signature carries the verdict and the registry's contents don't. Cost: a vulnerable image is briefly pullable, unsigned. Signing is keyless (the run's identity, not a long-lived key), so there is no key to leak, and verifying needs the workflow's name and the GitHub issuer. The scanner and signer run from pinned versions as plain commands, not as third-party actions, which keeps what runs in the release workflow to what is written in it.
 
 **CI gates the image.** The operator image is published only after lint, unit tests and e2e on kind pass, so what lands on GHCR has been tested.
 
@@ -537,6 +541,20 @@ git push origin v0.7.0
 ```
 
 CI publishes exactly `v0.7.0`, and later builds from `main` become `v0.7.0-build.<N>`. Tags are never overwritten: a second run for the same tag fails on purpose. A release tag rebuilds the image from the same commit, so it has the same code as that commit's `-build.<N>` image but a different digest.
+
+After the image is pushed, CI scans it with Trivy (HIGH and CRITICAL findings that have a fix fail the run) and only then signs it with cosign. A run that fails the scan leaves the image in the registry unsigned, so **deploy only images that verify**. The Go code is checked with `govulncheck` in the lint job, before anything is built.
+
+Each image carries an SBOM and build provenance, attached by BuildKit. Verify the signature, which proves the image was built by this repository's publish workflow, and read the SBOM:
+
+```bash
+cosign verify ghcr.io/alexanderbakin/platformator-operator:v0.9.0 \
+  --certificate-identity-regexp '^https://github.com/alexanderbakin/platformator/\.github/workflows/publish-image\.yml@' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+docker buildx imagetools inspect ghcr.io/alexanderbakin/platformator-operator:v0.9.0 --format '{{ json .SBOM }}'
+```
+
+Renovate (`renovate.json`) opens pull requests for Go modules, GitHub Actions (pinned by commit), the base image, Terraform providers and the scanner and signer versions in the workflows. It runs on Monday mornings and groups the small updates.
 
 To check what the cluster is running, compare the digest in the run summary with the pod:
 

@@ -82,16 +82,22 @@ type AppReconciler struct {
 	Recorder events.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/status,verbs=get;update;patch
+// The permissions below are what the controller calls, no more: children are
+// created and updated with CreateOrUpdate and removed by the garbage collector
+// through their owner reference, so there is no delete or patch. Apps are only
+// read, and their status is updated. Secrets and ConfigMaps are read cluster-wide
+// because Apps can reference them in any namespace (RBAC cannot limit a read to
+// metadata, the controller just asks for metadata only).
+// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/status,verbs=update
 // +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/finalizers,verbs=update
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
-// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 

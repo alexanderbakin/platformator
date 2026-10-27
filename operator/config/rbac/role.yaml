@@ -19,10 +19,8 @@ rules:
   - services
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -31,10 +29,8 @@ rules:
   - deployments
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -43,10 +39,8 @@ rules:
   - horizontalpodautoscalers
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -55,11 +49,8 @@ rules:
   - jobs
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - cert-manager.io
@@ -81,10 +72,8 @@ rules:
   - networkpolicies
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -92,24 +81,13 @@ rules:
   resources:
   - apps
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
 - apiGroups:
   - platformator.alexanderbakin.com
   resources:
   - apps/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - platformator.alexanderbakin.com
-  resources:
   - apps/status
   verbs:
-  - get
-  - patch
   - update

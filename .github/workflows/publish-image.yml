@@ -16,6 +16,12 @@ permissions: {}
 env:
   IMAGE_NAME: platformator-operator
   PLATFORMS: linux/amd64,linux/arm64
+  # The scanner and the signer run from pinned versions, so a release is not
+  # affected by a new version of either. Renovate raises the pull requests.
+  # renovate: datasource=docker depName=aquasec/trivy
+  TRIVY_VERSION: 0.65.0
+  # renovate: datasource=go depName=github.com/sigstore/cosign/v2
+  COSIGN_VERSION: v2.5.3
 
 jobs:
   # An image is published only if lint, unit tests and e2e pass on the same
@@ -46,6 +52,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write # keyless signing: the run proves its identity to Sigstore
     defaults:
       run:
         working-directory: operator
@@ -55,6 +62,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0 # the full history and tags, to find the latest version tag
+
+      # Needed to run cosign with "go run".
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
 
       - name: Work out the image reference
         id: image
@@ -93,9 +107,12 @@ jobs:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
         # The same target as a local build. It ignores failures of the build
         # command, so the next step is what proves the image was pushed.
-        run: make docker-buildx IMG="$IMAGE_REF" PLATFORMS="$PLATFORMS"
+        run: |
+          make docker-buildx IMG="$IMAGE_REF" PLATFORMS="$PLATFORMS" \
+            BUILDX_ATTESTATIONS="--sbom=true --provenance=mode=max"
 
       - name: Verify the pushed image
+        id: verify
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
         run: |
@@ -107,6 +124,7 @@ jobs:
             }
           done
           digest="$(grep -m1 '^Digest:' inspect.txt | awk '{print $2}')"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           {
             echo "### Published"
             echo
@@ -120,3 +138,24 @@ jobs:
             echo "make deploy-image IMG=${IMAGE_REF}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The image is already in the registry at this point, so a failing scan
+      # does not unpublish it. It is left unsigned instead, and the README says
+      # to deploy only signed images.
+      - name: Scan the image for vulnerabilities
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm -e TRIVY_USERNAME -e TRIVY_PASSWORD \
+            "aquasec/trivy:${TRIVY_VERSION}" image \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            "$IMAGE_REF"
+
+      - name: Sign the image
+        env:
+          IMAGE_REPO: ${{ steps.image.outputs.repo }}
+          IMAGE_DIGEST: ${{ steps.verify.outputs.digest }}
+        # Signed by digest, not by tag, so the signature is for these exact bytes.
+        run: go run "github.com/sigstore/cosign/v2/cmd/cosign@${COSIGN_VERSION}" sign --yes "${IMAGE_REPO}@${IMAGE_DIGEST}"

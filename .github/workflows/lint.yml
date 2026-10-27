@@ -44,3 +44,12 @@ jobs:
         run: make lint-config
       - name: Run linter
         run: make lint
+
+      # Fails when the code calls a function with a known vulnerability, in this
+      # module or in a dependency or the standard library. It reports only what
+      # is reachable, so it is quieter than a scan of go.mod alone.
+      - name: Check for known vulnerabilities
+        env:
+          # renovate: datasource=go depName=golang.org/x/vuln
+          GOVULNCHECK_VERSION: v1.1.4
+        run: go run "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}" ./...
