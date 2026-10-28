@@ -100,6 +100,11 @@ const (
 	// that holds the clone for BuildKit.
 	workspaceName = "workspace"
 	workspaceDir  = "/workspace"
+	// cloneDir is where the repository is cloned, one level below the volume.
+	// The volume's root belongs to root, and git refuses to work in a directory
+	// that another user owns ("dubious ownership"); a directory the clone
+	// creates itself belongs to the build user.
+	cloneDir = workspaceDir + "/src"
 	// deployKeyDir is where the deploy key Secret is mounted in the clone container.
 	deployKeyDir = "/ssh"
 )
@@ -464,7 +469,7 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 	if src.DeployKeySecret != "" {
 		// A private repository is cloned by an init container, so BuildKit
 		// builds a local directory instead of fetching the repository itself.
-		dir := workspaceDir
+		dir := cloneDir
 		if p := strings.Trim(src.Path, "/"); p != "" {
 			dir += "/" + p
 		}
@@ -551,8 +556,8 @@ func addClone(pod *corev1.PodSpec, src *platformatorv1alpha1.GitSource, commit s
 	const script = `set -eu
 cp ` + deployKeyDir + `/` + corev1.SSHAuthPrivateKey + ` /tmp/id
 chmod 600 /tmp/id
-git init -q ` + workspaceDir + `
-cd ` + workspaceDir + `
+git init -q ` + cloneDir + `
+cd ` + cloneDir + `
 git remote add origin "$REPOSITORY"
 git fetch -q --depth 1 origin "$COMMIT"
 git checkout -q --detach FETCH_HEAD

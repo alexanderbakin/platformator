@@ -79,7 +79,7 @@ func TestBuildJobForAPrivateRepository(t *testing.T) {
 	}
 
 	args := strings.Join(pod.Containers[0].Args, " ")
-	for _, want := range []string{"context=/workspace/services/api", "dockerfile=/workspace/services/api"} {
+	for _, want := range []string{"context=/workspace/src/services/api", "dockerfile=/workspace/src/services/api"} {
 		if !strings.Contains(args, want) {
 			t.Errorf("args %q lack %q", args, want)
 		}
@@ -223,6 +223,6 @@ var _ = Describe("App source with a private repository", func() {
 		job := &batchv1.Job{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "private-build-build-1111111", Namespace: app.Namespace}, job)).To(Succeed())
 		Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
-		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("context=/workspace"))
+		Expect(job.Spec.Template.Spec.Containers[0].Args).To(ContainElement("context=/workspace/src"))
 	})
 })
