@@ -446,6 +446,17 @@ spec:
                           on it triggers a new build.
                         pattern: ^[A-Za-z0-9._/-]+$
                         type: string
+                      deployKeySecret:
+                        description: |-
+                          deployKeySecret names a Secret in the App's namespace with the credentials
+                          for a private repository: the key ssh-privatekey (a private key without
+                          a passphrase, ideally a read-only deploy key of that one repository) and
+                          the key known_hosts (the public keys of the Git server, one per line, as in
+                          a known_hosts file). The server is refused if it presents any other key.
+                          Required for an SSH url, not allowed for an HTTPS one.
+                        maxLength: 253
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
                       dockerfile:
                         default: Dockerfile
                         description: dockerfile is the name of the Dockerfile inside
@@ -460,13 +471,19 @@ spec:
                         type: string
                       url:
                         description: |-
-                          url is the HTTPS address of a public repository, for example
-                          "https://github.com/owner/repo".
-                        pattern: ^https://\S+$
+                          url is the address of the repository. A public repository uses an HTTPS
+                          address, for example "https://github.com/owner/repo". A private one uses
+                          an SSH address, "git@github.com:owner/repo.git" or
+                          "ssh://git@github.com/owner/repo.git", together with deployKeySecret.
+                        pattern: ^(https://|ssh://|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:)\S+$
                         type: string
                     required:
                     - url
                     type: object
+                    x-kubernetes-validations:
+                    - message: set deployKeySecret for an SSH url, and only for an
+                        SSH url
+                      rule: self.url.startsWith('https://') != has(self.deployKeySecret)
                 required:
                 - git
                 type: object

@@ -1,0 +1,26 @@
+# The webhook is served on the apex of the platform domain, so no App can take
+# its address (Apps live on <name>.<domain>). Only /hooks/github is routed, and
+# the operator accepts only deliveries signed with the shared secret.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: operator-github-webhook
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: __DOMAIN__
+    http:
+      paths:
+      - path: /hooks/github
+        pathType: Prefix
+        backend:
+          service:
+            name: operator-github-webhook
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - __DOMAIN__
+    secretName: operator-github-webhook-tls

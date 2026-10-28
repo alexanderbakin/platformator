@@ -31,11 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
+	"github.com/alexanderbakin/platformator/operator/internal/gitrepo"
 )
 
-// HeadResolver finds the latest commit of a branch of a Git repository.
+// HeadResolver finds the latest commit of a branch of a Git repository. A nil
+// auth is a public repository over HTTPS; otherwise the repository is read over
+// SSH with the given deploy key.
 type HeadResolver interface {
-	Head(ctx context.Context, repoURL, branch string) (string, error)
+	Head(ctx context.Context, repoURL, branch string, auth *gitrepo.SSHAuth) (string, error)
 }
 
 // Build states, as stored in status.build.state.
@@ -49,6 +52,9 @@ const (
 	// buildBlocked: the build cannot start until something is fixed, today only
 	// a missing registry Secret. Unlike Failed, it is retried by itself.
 	buildBlocked = "Blocked"
+	// buildNoKey: a private repository's deploy key Secret is missing or
+	// unusable. Like Blocked, it is retried by itself.
+	buildNoKey = "NoDeployKey"
 )
 
 // Names of the Built condition and its reasons.
@@ -61,6 +67,7 @@ const (
 	reasonImageNotBuilt    = "ImageNotBuilt"
 	reasonBuildQueued      = "BuildQueued"
 	reasonSecretMissing    = "RegistrySecretMissing"
+	reasonDeployKeyMissing = "DeployKeyMissing"
 
 	// buildRetryInterval is how often a queued or blocked build is looked at again.
 	buildRetryInterval = 15 * time.Second
@@ -82,6 +89,19 @@ const (
 
 	// dockerConfigDir is where the registry Secret is mounted for BuildKit.
 	dockerConfigDir = "/home/user/.docker"
+
+	// knownHostsKey is the key of the deploy key Secret that holds the Git
+	// server's public keys. The private key is under corev1.SSHAuthPrivateKey.
+	knownHostsKey = "known_hosts"
+
+	// cloneName names the init container that clones a private repository.
+	cloneName = "clone"
+	// workspaceName and workspaceDir are the volume, and where it is mounted,
+	// that holds the clone for BuildKit.
+	workspaceName = "workspace"
+	workspaceDir  = "/workspace"
+	// deployKeyDir is where the deploy key Secret is mounted in the clone container.
+	deployKeyDir = "/ssh"
 )
 
 // buildOutcome is what a pass learned about the App's builds.
@@ -120,7 +140,21 @@ func (r *AppReconciler) reconcileBuild(ctx context.Context, app *platformatorv1a
 	if r.Resolver == nil {
 		return buildOutcome{}, fmt.Errorf("no Git resolver configured")
 	}
-	commit, err := r.Resolver.Head(ctx, src.Git.URL, src.Git.Branch)
+	var auth *gitrepo.SSHAuth
+	if secretName := src.Git.DeployKeySecret; secretName != "" {
+		key, problem, keyErr := r.deployKey(ctx, app.Namespace, secretName)
+		if keyErr != nil {
+			return out, keyErr
+		}
+		if problem != "" {
+			status.State = buildNoKey
+			status.Message = problem
+			out.requeue = buildRetryInterval
+			return out, nil
+		}
+		auth = key
+	}
+	commit, err := r.Resolver.Head(ctx, src.Git.URL, src.Git.Branch, auth)
 	if err != nil {
 		// A flaky or unreachable Git host must not fail the App; keep what runs.
 		status.Message = "cannot read the branch: " + err.Error()
@@ -234,6 +268,34 @@ func (r *AppReconciler) secretExists(ctx context.Context, namespace, name string
 	}
 }
 
+// deployKey reads the credentials of a private repository. The Secret is read
+// from the API server directly, not through the cache, so the operator does not
+// keep the data of every Secret in memory. problem is not empty when the Secret
+// cannot be used, and says how to fix that.
+func (r *AppReconciler) deployKey(ctx context.Context, namespace, name string) (*gitrepo.SSHAuth, string, error) {
+	var reader client.Reader = r.Client
+	if r.APIReader != nil {
+		reader = r.APIReader
+	}
+	var secret corev1.Secret
+	err := reader.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &secret)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, fmt.Sprintf(
+			"Secret %q not found in namespace %q. Create it: kubectl create secret generic %s "+
+				"--from-file=%s=<deploy key file> --from-file=%s=<known_hosts file> -n %s",
+			name, namespace, name, corev1.SSHAuthPrivateKey, knownHostsKey, namespace), nil
+	case err != nil:
+		return nil, "", err
+	}
+	key, hosts := secret.Data[corev1.SSHAuthPrivateKey], secret.Data[knownHostsKey]
+	if len(key) == 0 || len(hosts) == 0 {
+		return nil, fmt.Sprintf("Secret %q must have the keys %s and %s, both not empty",
+			name, corev1.SSHAuthPrivateKey, knownHostsKey), nil
+	}
+	return &gitrepo.SSHAuth{PrivateKey: key, KnownHosts: hosts}, "", nil
+}
+
 // buildLabel marks the Jobs the operator creates for builds.
 const buildLabel = "platformator.alexanderbakin.com/build"
 
@@ -311,6 +373,10 @@ func buildCondition(app *platformatorv1alpha1.App) *metav1.Condition {
 	case buildBlocked:
 		cond.Status = metav1.ConditionFalse
 		cond.Reason = reasonSecretMissing
+		cond.Message = b.Message
+	case buildNoKey:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonDeployKeyMissing
 		cond.Message = b.Message
 	default:
 		cond.Status = metav1.ConditionUnknown
@@ -394,12 +460,19 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 		deadline = new(int64(r.BuildTimeout.Seconds()))
 	}
 
-	args := []string{
-		"build",
-		"--frontend", "dockerfile.v0",
-		"--opt", "context=" + gitContext(&src, commit),
-		"--opt", "filename=" + dockerfile,
+	args := []string{"build", "--frontend", "dockerfile.v0"}
+	if src.DeployKeySecret != "" {
+		// A private repository is cloned by an init container, so BuildKit
+		// builds a local directory instead of fetching the repository itself.
+		dir := workspaceDir
+		if p := strings.Trim(src.Path, "/"); p != "" {
+			dir += "/" + p
+		}
+		args = append(args, "--local", "context="+dir, "--local", "dockerfile="+dir)
+	} else {
+		args = append(args, "--opt", "context="+gitContext(&src, commit))
 	}
+	args = append(args, "--opt", "filename="+dockerfile)
 	output := "type=image,name=" + image + ",push=true"
 	if r.RegistryInsecure {
 		// A local HTTP registry. BuildKit takes the insecure flag per output; for
@@ -415,7 +488,7 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 		)
 	}
 
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: app.Namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            &zero,
@@ -457,4 +530,81 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 			},
 		},
 	}
+	if src.DeployKeySecret != "" {
+		addClone(&job.Spec.Template.Spec, &src, commit, uid)
+	}
+	return job
+}
+
+// addClone makes the pod clone a private repository before BuildKit runs. It
+// adds an init container that fetches the commit over SSH into a volume shared
+// with the build container, and the volume that carries the deploy key.
+//
+// Git does the cloning, with the host key checked against the Secret's
+// known_hosts (StrictHostKeyChecking=yes, so an unknown or changed key stops the
+// build). BuildKit's own SSH support is not used for this, because it does not
+// let the operator decide which host keys to trust. The BuildKit image already
+// ships git and ssh, since BuildKit needs git for public repositories.
+func addClone(pod *corev1.PodSpec, src *platformatorv1alpha1.GitSource, commit string, uid int64) {
+	// The key is copied before use: ssh refuses a private key that others can
+	// read, and a Secret volume is group-readable when fsGroup is set.
+	const script = `set -eu
+cp ` + deployKeyDir + `/` + corev1.SSHAuthPrivateKey + ` /tmp/id
+chmod 600 /tmp/id
+git init -q ` + workspaceDir + `
+cd ` + workspaceDir + `
+git remote add origin "$REPOSITORY"
+git fetch -q --depth 1 origin "$COMMIT"
+git checkout -q --detach FETCH_HEAD
+rm -rf .git
+`
+	sshCommand := "ssh -i /tmp/id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes" +
+		" -o UserKnownHostsFile=" + deployKeyDir + "/" + knownHostsKey + " -o GlobalKnownHostsFile=/dev/null"
+	allow := false
+	mode := int32(0o440)
+
+	pod.SecurityContext = &corev1.PodSecurityContext{FSGroup: &uid}
+	pod.InitContainers = append(pod.InitContainers, corev1.Container{
+		Name:    cloneName,
+		Image:   pod.Containers[0].Image,
+		Command: []string{"sh", "-c", script},
+		Env: []corev1.EnvVar{
+			{Name: "REPOSITORY", Value: src.URL},
+			{Name: "COMMIT", Value: commit},
+			{Name: "GIT_SSH_COMMAND", Value: sshCommand},
+		},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("500m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+		},
+		SecurityContext: &corev1.SecurityContext{
+			RunAsUser:                &uid,
+			RunAsGroup:               &uid,
+			AllowPrivilegeEscalation: &allow,
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: workspaceName, MountPath: workspaceDir},
+			{Name: "deploy-key", MountPath: deployKeyDir, ReadOnly: true},
+		},
+	})
+	pod.Containers[0].VolumeMounts = append(pod.Containers[0].VolumeMounts,
+		corev1.VolumeMount{Name: workspaceName, MountPath: workspaceDir, ReadOnly: true})
+	pod.Volumes = append(pod.Volumes,
+		corev1.Volume{Name: workspaceName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		corev1.Volume{Name: "deploy-key", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName:  src.DeployKeySecret,
+			DefaultMode: &mode,
+			Items: []corev1.KeyToPath{
+				{Key: corev1.SSHAuthPrivateKey, Path: corev1.SSHAuthPrivateKey},
+				{Key: knownHostsKey, Path: knownHostsKey},
+			},
+		}}},
+	)
 }

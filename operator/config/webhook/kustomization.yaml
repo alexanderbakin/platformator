@@ -1,0 +1,11 @@
+# Optional: lets GitHub reach the operator's push webhook. Apply it with
+#
+#   make deploy-webhook
+#
+# which fills in the host from DOMAIN in config/default/operator.env. The
+# operator must run with GITHUB_WEBHOOK_ADDR=:8082 and the github-webhook Secret
+# (see the README, "Builds on push").
+namespace: operator-system
+resources:
+- service.yaml
+- ingress.yaml

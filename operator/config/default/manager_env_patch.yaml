@@ -12,3 +12,15 @@
           name: operator-config
           key: REGISTRY
           optional: true
+    - name: GITHUB_WEBHOOK_ADDR
+      valueFrom:
+        configMapKeyRef:
+          name: operator-config
+          key: GITHUB_WEBHOOK_ADDR
+          optional: true
+    - name: GITHUB_WEBHOOK_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: github-webhook
+          key: secret
+          optional: true

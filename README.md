@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 21 of 30.
+Day 22 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -112,6 +112,10 @@ Each entry says what was chosen, why, and what it costs.
 **The image is scanned after it is pushed, and a signature means it passed.** Scanning before the push would need the image built and loaded twice. Instead the multi-architecture image is pushed, scanned, and signed by digest only if the scan passes, so the signature carries the verdict and the registry's contents don't. Cost: a vulnerable image is briefly pullable, unsigned. Signing is keyless (the run's identity, not a long-lived key), so there is no key to leak, and verifying needs the workflow's name and the GitHub issuer. The scanner and signer run from pinned versions as plain commands, not as third-party actions, which keeps what runs in the release workflow to what is written in it.
 
 **CI gates the image.** The operator image is published only after lint, unit tests and e2e on kind pass, so what lands on GHCR has been tested.
+
+**A private repository is cloned by git, not by BuildKit.** BuildKit can fetch an SSH Git context with a forwarded key, but it decides by itself which host keys to accept. An init container running git with `StrictHostKeyChecking=yes` and a `known_hosts` from the same Secret keeps that decision in the operator's hands, and keeps the deploy key out of the container that runs untrusted Dockerfile steps. The branch lookup uses the same Secret and the same host key check, through Go's SSH client, so the operator does not need a git or ssh binary. Cost: the build image must contain git and ssh (the BuildKit image does), and a build of a private repository does one extra step before BuildKit starts.
+
+**A webhook only hurries the poll along.** The push handler does not carry a commit into the build: it asks the controller to look at the matching Apps now, and the controller finds the branch head the same way it does every minute. A lost, duplicated or forged-and-rejected delivery therefore cannot start a wrong build or skip one, and the worst case without webhooks is the polling delay. Cost: one more public path on the node, guarded by an HMAC, and a second place that has to know the secret.
 
 ## Getting started
 
@@ -408,7 +412,68 @@ Build safety:
 - Build pods ask for 250m CPU and 512Mi and may use 1 CPU and 1.5Gi, so a ResourceQuota accepts them and one build cannot starve the node.
 - BuildKit keeps a layer cache in `<REGISTRY>/<namespace>-<name>:buildcache`, so a build reuses unchanged layers.
 
-Limits for now: public repositories only, one Dockerfile build per commit, and the BuildKit Job runs rootless with seccomp and AppArmor unconfined, which the node must allow. Old images and the cache stay in the registry; deleting them needs a token scope the operator does not hold.
+Limits for now: one Dockerfile build per commit, and the BuildKit Job runs rootless with seccomp and AppArmor unconfined, which the node must allow. Old images and the cache stay in the registry; deleting them needs a token scope the operator does not hold.
+
+### Private repositories
+
+A private repository is read over SSH with a deploy key. Use an SSH address and name a Secret in the App's namespace:
+
+```yaml
+spec:
+  source:
+    git:
+      url: git@github.com:owner/private-repo.git   # or ssh://git@github.com/owner/private-repo.git
+      deployKeySecret: repo-deploy-key
+```
+
+```bash
+# A key pair that belongs to this one repository: add the public half as a read-only deploy key.
+ssh-keygen -t ed25519 -N "" -C platformator -f ./deploy-key
+
+# The Git server's public keys, from GitHub's own list. Check them against
+# https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
+curl -s https://api.github.com/meta | jq -r '.ssh_keys[] | "github.com " + .' > known_hosts
+
+kubectl create secret generic repo-deploy-key \
+  --from-file=ssh-privatekey=./deploy-key --from-file=known_hosts=./known_hosts
+```
+
+- The branch is looked up over SSH by the operator, and the commit is cloned by an init container in the build Pod. The key is mounted in that init container only, not in the build container that runs the Dockerfile.
+- Host keys are checked against `known_hosts` in the Secret, both for the lookup and for the clone. A server that presents any other key is refused, so there is no trust on first use. Use plain host names in the file (`ssh-keyscan` without `-H`).
+- `deployKeySecret` is required for an SSH address and not allowed for an HTTPS one. A missing or incomplete Secret shows as `Built` False with reason `DeployKeyMissing` and the command to create it, and is retried by itself.
+- The key must not have a passphrase. The operator reads the Secret from the API server each time it checks the branch, so a rotated key is used on the next check.
+- The Dockerfile build itself is unchanged: BuildKit builds the cloned directory, so `path` and `dockerfile` work as for a public repository.
+
+### Builds on push
+
+By default the operator checks every branch once a minute. A GitHub webhook makes a push start its build at once. It is optional, and the polling stays on either way, so a lost delivery only costs up to a minute.
+
+```bash
+# 1. A shared secret, in the operator's namespace. Create it before the operator starts (or restart the operator after).
+openssl rand -hex 32 > webhook-secret
+kubectl create secret generic github-webhook -n operator-system --from-literal=secret="$(cat webhook-secret)"
+
+# 2. Turn the listener on: add to config/default/operator.env, then deploy the operator as usual.
+GITHUB_WEBHOOK_ADDR=:8082
+
+# 3. Route https://<DOMAIN>/hooks/github to it (DOMAIN from operator.env).
+make deploy-webhook
+```
+
+Then, in the GitHub repository under Settings, Webhooks, add one with the payload URL `https://<DOMAIN>/hooks/github`, content type `application/json`, the secret from `webhook-secret`, and "Just the push event". GitHub sends a `ping` first. Its delivery page ("Recent Deliveries") shows the operator's answer, `{"triggered":1}` for a push to a branch that one App builds.
+
+To try it without GitHub, send a signed `ping`:
+
+```bash
+body='{"zen":"test"}'
+sig="sha256=$(printf '%s' "$body" | openssl dgst -sha256 -hmac "$(cat webhook-secret)" | sed 's/^.* //')"
+curl -i "https://<DOMAIN>/hooks/github" -H "X-GitHub-Event: ping" -H "X-Hub-Signature-256: $sig" -d "$body"   # 200, pong
+```
+
+- A delivery without a valid `X-Hub-Signature-256` (HMAC-SHA256 of the body with the secret) gets 401 and nothing is read from it. The listener does not start without the secret.
+- A push matches an App when the repository and the branch are the same as in `spec.source.git`. The https and ssh addresses of one repository count as the same, so the webhook also works for private repositories.
+- Tags, deleted branches and other event types are acknowledged and ignored.
+- The listener is served on the apex of the platform domain (`https://<DOMAIN>/hooks/github`), so no App can take its address, and only that path is routed.
 
 ### Network isolation
 
@@ -562,6 +627,19 @@ To check what the cluster is running, compare the digest in the run summary with
 kubectl get pod -n operator-system -o jsonpath='{.items[*].status.containerStatuses[*].imageID}'
 ```
 
+### Terraform checks
+
+The `Terraform` workflow runs on every change under `terraform/`: `terraform fmt -check`, Checkov (insecure configuration), TFLint with the AWS rule set, and `terraform validate` without a backend, so it needs no AWS credentials. The tools run from pinned versions in their official images, and Renovate raises the updates. The same checks by hand, from `terraform/`:
+
+```bash
+terraform fmt -check -diff -recursive
+checkov -d . --framework terraform --compact --quiet
+tflint --init && tflint
+terraform init -backend=false && terraform validate
+```
+
+Findings that are accepted are skipped in the code, next to the resource and with the reason (`#checkov:skip=CKV_AWS_260:...`), so a skip cannot hide in a config file. What was fixed instead of skipped: the instance accepts only IMDSv2, its root volume is encrypted, it is EBS-optimized, every security group rule has a description, and the VPC's default security group has no rules. What is skipped, and why: VPC flow logs and detailed monitoring (cost, one node), an IAM role on the instance (nothing on it calls AWS), port 80 open to the world (certificate challenges and the HTTPS redirect) and open egress (the node pulls images and packages).
+
 ### Tests
 
 ```bash
@@ -598,3 +676,4 @@ The Git build spec starts a registry inside the kind cluster, points the operato
 18. [Day 18](https://lnkd.in/p/dkgW987E)
 19. [Day 19](https://lnkd.in/p/deSZWa5n)
 20. [Day 20](https://lnkd.in/p/dXHXJynm)
+21. [Day 21](https://lnkd.in/p/dSHdGaCN)

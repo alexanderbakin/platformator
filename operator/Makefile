@@ -200,6 +200,19 @@ deploy-monitoring: kustomize ## Let Prometheus scrape the operator and load the 
 undeploy-monitoring: kustomize ## Remove what deploy-monitoring added. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/monitoring | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+.PHONY: deploy-webhook
+deploy-webhook: kustomize ## Expose the GitHub push webhook at https://$DOMAIN/hooks/github (DOMAIN from config/default/operator.env).
+	@domain="$$(sed -n 's/^DOMAIN=//p' config/default/operator.env | tail -n 1)"; \
+	if [ -z "$$domain" ]; then echo "DOMAIN is not set in config/default/operator.env" >&2; exit 1; fi; \
+	tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
+	cp -r config/webhook "$$tmp/webhook"; \
+	sed -i.bak "s/__DOMAIN__/$$domain/g" "$$tmp/webhook/ingress.yaml"; \
+	"$(KUSTOMIZE)" build "$$tmp/webhook" | "$(KUBECTL)" apply -f -
+
+.PHONY: undeploy-webhook
+undeploy-webhook: kustomize ## Remove what deploy-webhook added. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	"$(KUSTOMIZE)" build config/webhook | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
+
 ##@ Dependencies
 
 ## Location to install dependencies to

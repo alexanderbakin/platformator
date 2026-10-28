@@ -38,8 +38,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
 )
@@ -65,6 +67,16 @@ type AppReconciler struct {
 
 	// Resolver finds the head commit of a branch.
 	Resolver HeadResolver
+
+	// Triggers carries Apps to look at right away, for example after a GitHub
+	// push webhook. It is optional: branches are polled either way.
+	Triggers <-chan event.GenericEvent
+
+	// APIReader reads objects straight from the API server, bypassing the
+	// cache. It is used for the one Secret per private App that holds a deploy
+	// key, so the cache never fills with the data of every Secret. When it is nil
+	// (tests), the Client is used.
+	APIReader client.Reader
 
 	// BuildTimeout stops a build Job that runs longer than this. Zero means no limit.
 	BuildTimeout time.Duration
@@ -845,7 +857,7 @@ func (r *AppReconciler) emitBuildEvent(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&platformatorv1alpha1.App{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -857,6 +869,9 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// never holds their data in memory.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.appsUsing(kindSecret)), builder.OnlyMetadata).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.appsUsing(kindConfigMap)), builder.OnlyMetadata).
-		Named("app").
-		Complete(r)
+		Named("app")
+	if r.Triggers != nil {
+		b = b.WatchesRawSource(source.Channel(r.Triggers, &handler.EnqueueRequestForObject{}))
+	}
+	return b.Complete(r)
 }

@@ -1,0 +1,27 @@
+# An App built from a private Git repository over SSH. Before applying it,
+# create the Secret it names in this namespace:
+#
+#   kubectl create secret generic repo-deploy-key \
+#     --from-file=ssh-privatekey=./deploy-key --from-file=known_hosts=./known_hosts
+#
+# The README section "Private repositories" shows how to make both files.
+apiVersion: platformator.alexanderbakin.com/v1alpha1
+kind: App
+metadata:
+  name: private-app
+spec:
+  source:
+    git:
+      url: git@github.com:<owner>/<repo>.git
+      deployKeySecret: repo-deploy-key
+      branch: main
+  port: 80
+  minReplicas: 1
+  maxReplicas: 3
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "50M"
+    limits:
+      cpu: "100m"
+      memory: "100M"

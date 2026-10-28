@@ -133,12 +133,26 @@ type Source struct {
 }
 
 // GitSource is a Git repository with a Dockerfile.
+// +kubebuilder:validation:XValidation:rule="self.url.startsWith('https://') != has(self.deployKeySecret)",message="set deployKeySecret for an SSH url, and only for an SSH url"
 type GitSource struct {
-	// url is the HTTPS address of a public repository, for example
-	// "https://github.com/owner/repo".
+	// url is the address of the repository. A public repository uses an HTTPS
+	// address, for example "https://github.com/owner/repo". A private one uses
+	// an SSH address, "git@github.com:owner/repo.git" or
+	// "ssh://git@github.com/owner/repo.git", together with deployKeySecret.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^https://\S+$`
+	// +kubebuilder:validation:Pattern=`^(https://|ssh://|[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:)\S+$`
 	URL string `json:"url"`
+
+	// deployKeySecret names a Secret in the App's namespace with the credentials
+	// for a private repository: the key ssh-privatekey (a private key without
+	// a passphrase, ideally a read-only deploy key of that one repository) and
+	// the key known_hosts (the public keys of the Git server, one per line, as in
+	// a known_hosts file). The server is refused if it presents any other key.
+	// Required for an SSH url, not allowed for an HTTPS one.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	DeployKeySecret string `json:"deployKeySecret,omitempty"`
 
 	// branch is the branch to follow. A new commit on it triggers a new build.
 	// +optional

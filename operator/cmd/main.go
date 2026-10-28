@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -38,6 +39,7 @@ import (
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
 	"github.com/alexanderbakin/platformator/operator/internal/controller"
+	"github.com/alexanderbakin/platformator/operator/internal/githubhook"
 	"github.com/alexanderbakin/platformator/operator/internal/gitrepo"
 	// +kubebuilder:scaffold:imports
 )
@@ -79,6 +81,10 @@ func main() {
 		"Name of the dockerconfigjson Secret, in each App's namespace, used to push and pull built images.")
 	flag.StringVar(&builderImage, "buildkit-image", "moby/buildkit:v0.23.2-rootless",
 		"Rootless BuildKit image that runs the build Jobs.")
+	var githubWebhookAddr string
+	flag.StringVar(&githubWebhookAddr, "github-webhook-bind-address", os.Getenv("GITHUB_WEBHOOK_ADDR"),
+		"Address that receives GitHub push webhooks, e.g. :8082. Empty turns webhooks off; branches are polled "+
+			"either way. Needs the GITHUB_WEBHOOK_SECRET env var. Falls back to the GITHUB_WEBHOOK_ADDR env var.")
 	var buildTimeout time.Duration
 	var maxBuilds int
 	var ingressNamespace string
@@ -212,6 +218,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Apps that a push webhook wants looked at right away.
+	triggers := make(chan event.GenericEvent, 64)
+
 	if err := (&controller.AppReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
@@ -221,15 +230,35 @@ func main() {
 		RegistrySecret:   registrySecret,
 		RegistryInsecure: registryInsecure,
 		BuilderImage:     builderImage,
-		Resolver:         &gitrepo.HTTP{},
+		Resolver:         &gitrepo.Resolver{},
+		APIReader:        mgr.GetAPIReader(),
 		BuildTimeout:     buildTimeout,
 		MaxBuilds:        maxBuilds,
 		IngressNamespace: ingressNamespace,
+		Triggers:         triggers,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")
 		os.Exit(1)
 	}
 	controller.RegisterMetrics(mgr.GetClient())
+	if githubWebhookAddr != "" {
+		secret := os.Getenv("GITHUB_WEBHOOK_SECRET")
+		if secret == "" {
+			setupLog.Error(nil, "GITHUB_WEBHOOK_SECRET is required when GitHub webhooks are on")
+			os.Exit(1)
+		}
+		if err := mgr.Add(&githubhook.Server{
+			Addr: githubWebhookAddr,
+			Handler: &githubhook.Handler{
+				Secret: []byte(secret),
+				Reader: mgr.GetClient(),
+				Events: triggers,
+			},
+		}); err != nil {
+			setupLog.Error(err, "Failed to add the GitHub webhook server")
+			os.Exit(1)
+		}
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

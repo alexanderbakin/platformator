@@ -1,0 +1,79 @@
+name: Terraform
+
+on:
+  push:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  # The tools run from pinned versions, in their official images, so a new
+  # version of any of them cannot break the checks by surprise. Renovate raises
+  # the pull requests.
+  # renovate: datasource=docker depName=hashicorp/terraform
+  TERRAFORM_VERSION: 1.16.3
+  # renovate: datasource=docker depName=ghcr.io/terraform-linters/tflint
+  TFLINT_VERSION: v0.50.3
+  # renovate: datasource=docker depName=bridgecrew/checkov
+  CHECKOV_VERSION: 3.2.0
+
+jobs:
+  terraform:
+    name: Format, scan, lint and validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Each tool runs as the runner's user, so nothing in the workspace is left
+      # owned by root.
+      - name: Check formatting
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+            "hashicorp/terraform:${TERRAFORM_VERSION}" fmt -check -diff -recursive
+
+      # Before "init", so the downloaded providers are not scanned. Findings that
+      # are accepted are skipped in the code, next to the resource and with the
+      # reason (#checkov:skip=ID:reason).
+      - name: Scan for insecure configuration (Checkov)
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -w /work \
+            "bridgecrew/checkov:${CHECKOV_VERSION}" -d /work --framework terraform --compact --quiet
+
+      - name: Lint (TFLint)
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # to download the AWS rule set without hitting the rate limit
+        run: |
+          plugins="$RUNNER_TEMP/tflint-plugins"
+          mkdir -p "$plugins"
+          run_tflint() {
+            docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" -v "$plugins:/plugins" -w /work \
+              -e TFLINT_PLUGIN_DIR=/plugins -e GITHUB_TOKEN \
+              "ghcr.io/terraform-linters/tflint:${TFLINT_VERSION}" "$@"
+          }
+          run_tflint --init
+          run_tflint
+
+      # No backend, so no AWS credentials and no state are needed.
+      - name: Validate
+        run: |
+          terraform() {
+            docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/work" -w /work \
+              "hashicorp/terraform:${TERRAFORM_VERSION}" "$@"
+          }
+          terraform init -backend=false -input=false
+          terraform validate

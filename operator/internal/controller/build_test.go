@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	platformatorv1alpha1 "github.com/alexanderbakin/platformator/operator/api/v1alpha1"
+	"github.com/alexanderbakin/platformator/operator/internal/gitrepo"
 )
 
 const (
@@ -42,6 +43,7 @@ const (
 	testRegistry  = "ghcr.io/owner"
 
 	testRegistrySecret = "registry-credentials"
+	testBuilderImage   = "moby/buildkit:rootless"
 )
 
 // ensureRegistrySecret creates the Secret the build Jobs need, unless an earlier
@@ -61,9 +63,12 @@ func ensureRegistrySecret(ctx context.Context) {
 type fakeResolver struct {
 	commit string
 	err    error
+	// auth is the deploy key of the last lookup, nil for a public repository.
+	auth *gitrepo.SSHAuth
 }
 
-func (f *fakeResolver) Head(context.Context, string, string) (string, error) {
+func (f *fakeResolver) Head(_ context.Context, _, _ string, auth *gitrepo.SSHAuth) (string, error) {
+	f.auth = auth
 	return f.commit, f.err
 }
 
@@ -147,7 +152,7 @@ var _ = Describe("App source", func() {
 		return &AppReconciler{
 			Client: k8sClient, Scheme: k8sClient.Scheme(), Domain: testDomain,
 			Registry: testRegistry, RegistrySecret: testRegistrySecret,
-			BuilderImage: "moby/buildkit:rootless", Resolver: resolver,
+			BuilderImage: testBuilderImage, Resolver: resolver,
 			BuildTimeout: DefaultBuildTimeout,
 		}
 	}
