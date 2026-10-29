@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 22 of 30.
+Day 23 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -18,6 +18,7 @@ What the operator does today:
 - **Config reload and security:** pods restart by themselves when a Secret or ConfigMap they read changes, and every pod gets no privilege escalation and the default seccomp profile, with non-root, read-only filesystem and dropped capabilities available under `spec.security`. See [Configuration and Secrets](#configuration-and-secrets) and [Security defaults](#security-defaults).
 - **Isolation and build safety:** every App gets a NetworkPolicy that lets only the ingress controller in, an App whose hostname belongs to an older App in another namespace waits with `HostTaken`, a quota that refuses pods is reported on `Ready` as `ReplicaFailure`, and builds have a timeout, a concurrency limit and resource limits. See [Network isolation](#network-isolation), [Teams and quotas](#teams-and-quotas) and the [Threat model](#threat-model).
 - **Builds from Git:** instead of an `image`, an App can name a public repository. The operator watches the branch, builds the Dockerfile in the cluster with BuildKit, pushes to GHCR and rolls the Deployment to the new image. See [Building from Git](#building-from-git).
+- **Custom domains:** `spec.domains` serves an App on names of your own, each with its own Let's Encrypt certificate, next to its address under the platform domain. A separate `DomainsReady` condition reports them, so a name whose DNS is not ready yet does not make a working App look broken. See [Custom domains](#custom-domains).
 - **Metrics and a dashboard:** besides the controller-runtime metrics, the operator exports `platformator_apps` (Apps by `Ready` status and reason), `platformator_app_builds` (latest build state), `platformator_builds_total` and `platformator_build_duration_seconds`. Prometheus, Grafana, Loki and Alloy come with the node. A dashboard in the repo shows the Apps, the builds, the operator, the autoscaling and the logs of one App, and alert rules cover the operator, the builds and the Apps. See [Observability](#observability).
 - **In-cluster deployment:** runs from an image on GHCR. The base domain comes from a gitignored `operator.env` through a Kustomize-generated ConfigMap, so it never lands in git.
 - **Tests:** envtest-based tests for the controller, a kind-based e2e suite that runs the real operator as its real ServiceAccount, and GitHub Actions running lint, unit tests and e2e on every push.
@@ -117,6 +118,12 @@ Each entry says what was chosen, why, and what it costs.
 
 **A webhook only hurries the poll along.** The push handler does not carry a commit into the build: it asks the controller to look at the matching Apps now, and the controller finds the branch head the same way it does every minute. A lost, duplicated or forged-and-rejected delivery therefore cannot start a wrong build or skip one, and the worst case without webhooks is the polling delay. Cost: one more public path on the node, guarded by an HMAC, and a second place that has to know the secret.
 
+**Every custom domain gets its own certificate and a condition of its own.** One certificate for all the names would be simpler, but HTTP-01 issues it only when every name validates, so one name with a wrong DNS record would hold up the others and the App's own address. A certificate and a Secret per name keeps a bad name to itself. The Secret is named from a hash of the domain, not its position in the list, so reordering the list does not issue everything again. `DomainsReady` is separate from `Ready` because a pending name is the domain owner's DNS to fix, not a failure of the App, and tying them together would raise "App not Ready" for an App that serves fine. Names are first come, first served, the older App keeps a contested one, because the operator cannot know who owns a domain. Cost: more certificates, and Let's Encrypt's limits count certificates per registered domain, so many Apps with several names under one domain could reach them, especially when every certificate is asked for again after a rebuild. Nothing proves who owns a name beyond its DNS and the challenge.
+
+**Secrets are committed sealed, with a key that lives outside the cluster.** Sealed Secrets encrypts a Secret to a public certificate, so the encrypted file can sit in Git next to the App manifests, and a controller in the cluster turns it back into an ordinary Secret. The operator needs no change, because Apps already read ordinary Secrets through `envFrom`. The catch with a node that is destroyed often is the private key: the controller makes its own on first start, and files sealed for the last cluster would not open on the next one. So I generate the key pair once with a script, keep the private half in a file outside the repo, and Ansible installs it before the controller starts, with key renewal turned off so there is exactly one key. Cost: that file is the one thing to back up, losing it means sealing every secret again, and whoever holds it can open every sealed file.
+
+**External Secrets and the Secrets Store CSI driver were considered and left out.** The External Secrets Operator would keep the values in AWS, which survives the cluster with no key to back up, but a pod has to authenticate to AWS to read them. The node accepts only IMDSv2 and leaves the hop limit at its default of 1, so pods cannot reach the instance's credentials, which is the point of that setting. Allowing it would give every pod on the node a route to the node's role, and a static IAM key would need a Secret created by hand, the problem being solved. The CSI driver mounts values as files and mirrors them into a Secret only while a pod mounts them, which does not fit `envFrom`, build Jobs or the operator's own Secrets without changing what the operator creates. Cost: no central store to rotate from. On a cluster with a per-pod AWS identity (EKS, for example) External Secrets would be the better answer.
+
 ## Getting started
 
 ### Set up your environment
@@ -141,11 +148,11 @@ export HOSTED_ZONE_NAME
 read -p "Subdomain to serve the platform on, e.g. paas.example.com: " DOMAIN
 export DOMAIN
 
-read -p "Email for Let's Encrypt expiry/revocation notices: " ACME_EMAIL
+read -p "Email for the Let's Encrypt account (optional, press Enter to skip): " ACME_EMAIL
 export ACME_EMAIL
 ```
 
-These stay exported for the rest of this walkthrough - Terraform's backend init, the Route53 lookup, the Ansible dynamic inventory, and the k3s/cert-manager config all read them back out of the environment rather than a committed file, since they're specific to your setup.
+These stay exported for the rest of this walkthrough. The Ansible dynamic inventory and the k3s and cert-manager config read `AWS_DEFAULT_REGION`, `DOMAIN` and `ACME_EMAIL` from the environment rather than a committed file, since they're specific to your setup. `ACME_EMAIL` is optional: Let's Encrypt issues certificates either way, and without it the account is registered with no contact address. `HOSTED_ZONE_NAME` is used only by the Route53 commands below, because Terraform reads the zone from `terraform.tfvars`.
 
 ### Bootstrap the state bucket
 
@@ -238,6 +245,8 @@ By default k3s, cert-manager and the monitoring stack (kube-prometheus-stack) in
 ```bash
 ansible-playbook playbook.yml -e k3s_version=v1.32.1+k3s1 -e cert_manager_version=v1.21.2 -e kube_prometheus_stack_version=<chart version>
 ```
+
+To keep Secrets sealed in Git openable on every new node, also pass the Sealed Secrets key, see [Sealed Secrets](#sealed-secrets).
 
 ### Use kubectl
 
@@ -357,6 +366,44 @@ Pods read these values when they start, so a change has to restart them. The ope
 
 The operator reads only the metadata of these objects, never their data, so a Secret's contents never enter the operator's memory. Kubernetes cannot grant metadata-only access, though, so the operator's role has `get`, `list` and `watch` on Secrets and ConfigMaps in every namespace. An App that uses neither gets no annotation and is never restarted by this. `kubectl rollout restart` still does not stick, because the operator rewrites the pod template on every pass.
 
+### Sealed Secrets
+
+A Secret that belongs in Git is sealed first: it is encrypted to a public certificate, and a controller on the node (installed by the Ansible playbook) turns the committed file back into an ordinary Secret. Apps read it through `envFrom` like any other Secret, and the config reload restarts their pods when it changes. You need [`kubeseal`](https://github.com/bitnami/sealed-secrets#kubeseal) (`brew install kubeseal`).
+
+Make the key pair once:
+
+```bash
+sealed-secrets/generate-key.sh
+```
+
+It writes two files to `~/.config/platformator/sealed-secrets/`: `key.yaml`, the private key, and `pub-cert.pem`, the public certificate. Back up `key.yaml` outside this repo and this machine (a password manager works) and never commit it. The certificate can only seal, so it is safe to commit if you want it in the repo. The script refuses to overwrite an existing key.
+
+Give the key to Ansible, so every new node starts with it:
+
+```bash
+cd ansible
+ansible-playbook playbook.yml -e sealed_secrets_key_file=$HOME/.config/platformator/sealed-secrets/key.yaml
+```
+
+The playbook puts the key in k3s's manifests directory (mode 0600) and starts the controller with key renewal off, so there is one key and the certificate stays valid for ten years. Without the variable the controller makes its own key, and files sealed for another cluster will not open. If you add the key to a node whose controller has already made one, restart it so it reads the key: `kubectl -n kube-system rollout restart deployment/sealed-secrets-controller`.
+
+Seal a Secret with the certificate, no cluster connection needed:
+
+```bash
+kubectl create secret generic db-credentials --namespace default \
+  --from-literal=DATABASE_URL='postgres://user:password@host/db' \
+  --dry-run=client -o yaml \
+  | kubeseal --cert ~/.config/platformator/sealed-secrets/pub-cert.pem --format yaml \
+  > db-credentials.sealed.yaml
+
+kubectl apply -f db-credentials.sealed.yaml
+kubectl get secret db-credentials
+```
+
+The sealed file is safe to commit. By default it is bound to the Secret's name and namespace, so renaming it or moving it to another namespace makes it fail to open: seal it again for the new place. The namespace has to exist before you apply the file, and if a sealed file does not turn into a Secret, `kubectl describe sealedsecret <name>` shows why. On a new cluster you apply the same files again, with no Secrets to create by hand. The Secrets the operator itself needs (`registry-credentials`, `github-webhook`) can be sealed the same way, for their own namespace.
+
+If the key is lost, nothing can open the sealed files: make a new key and seal the secrets again.
+
 ### Security defaults
 
 Every App's pods run with no privilege escalation and the container runtime's default seccomp profile. Both are safe for ordinary images. Three more settings can break an image, so they are opt-in under `spec.security`:
@@ -475,6 +522,31 @@ curl -i "https://<DOMAIN>/hooks/github" -H "X-GitHub-Event: ping" -H "X-Hub-Sign
 - Tags, deleted branches and other event types are acknowledged and ignored.
 - The listener is served on the apex of the platform domain (`https://<DOMAIN>/hooks/github`), so no App can take its address, and only that path is routed.
 
+### Custom domains
+
+An App is always served on `<name>.$DOMAIN`. `spec.domains` adds names of your own next to it:
+
+```yaml
+spec:
+  domains:
+    - shop.example.org
+    - www.shop.example.org
+```
+
+There is a complete example in `examples/custom-domain/app.yaml`. To use it:
+
+1. Point each name's DNS at the cluster. A CNAME to the App's own address (`<name>.$DOMAIN`) works for any subdomain and follows the node when the cluster is rebuilt, because Terraform updates that address. A name that cannot be a CNAME, such as a bare domain, needs an A record with the node's Elastic IP (`terraform output eip`), which changes with every new cluster.
+2. Apply the App. cert-manager proves control of each name with the HTTP-01 challenge on port 80 and issues one certificate per name, which is why wildcards are not allowed and the DNS record has to exist first. If it did not yet, cert-manager retries by itself with growing delays, so a name can take a while to turn ready once DNS is fixed.
+3. Look at `kubectl get app <name> -o wide`, which has a `DOMAINS` column, and at `kubectl describe app <name>`, where the `DomainsReady` condition says which name is waiting and why.
+
+What to know:
+
+- Names are lowercase DNS names with at least one dot, at most ten per App, and each is checked by the CRD (no wildcards, no IP addresses, no duplicates).
+- A name under the platform domain is refused (`DomainNotAllowed`), because those addresses belong to the Apps and to the webhook.
+- A name that another App already lists stays with the older App (`DomainTaken`), as with hostnames. The newer App keeps serving its other names and its own address, and gets the name once the older App is gone or stops listing it.
+- `Ready` and `status.url` do not depend on the custom domains. A name whose DNS is wrong shows up in `DomainsReady` and nowhere else, and it does not hold up the certificate of the App's own address or of the other names.
+- Removing a name from the list stops serving it. The operator does not delete the Secret that holds its certificate (`<name>-tls-<hash>`), so remove it yourself if you want it gone.
+
 ### Network isolation
 
 Every App gets a NetworkPolicy named after it. Only the ingress controller's pods (Traefik in `kube-system` on k3s, set with `--ingress-namespace`) may connect, and only to the App's port. Pods of other Apps and other namespaces cannot reach it, and neither can anything else in the cluster. Egress is not restricted: Apps need the internet and their databases.
@@ -517,7 +589,9 @@ This is soft multi-tenancy for teams that trust each other, not isolation for ho
 | The registry token leaks | It lives in a per-namespace Secret, mounted only into the build container, not into the build steps | The token is a personal access token with broad scopes (see Design Decisions). Anyone who can read the Secret, or compromise BuildKit, gets it. One registry account holds all images, so that token can overwrite any tenant's image |
 | The operator is compromised | It reads only the metadata of Secrets and ConfigMaps | Its role can read every Secret and ConfigMap in the cluster (Kubernetes cannot grant metadata-only access) and create workloads everywhere |
 | One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik (if the CNI enforces it; k3s does, plain flannel would accept the policies and ignore them), quotas cap usage, the older App keeps a hostname | Egress is open, the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
+| A tenant claims a domain it does not own | A name must pass the HTTP-01 challenge, so a certificate is issued only if its DNS points at this cluster. Names under the platform domain are refused, and the older App keeps a contested name | Nothing checks who owns a name: the first App to list it holds it. A tenant can sit on a name another team wants, and a name whose DNS already points at the node is served, with a certificate, for whoever claimed it first |
 | Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by tag, not digest. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
+| The Sealed Secrets key leaks | It is made once outside the repo, kept in a file that is not committed, and lives in the cluster as one Secret in `kube-system`, which no tenant Role can read. On the node the Ansible copy is root-only (mode 0600) and the root volume is encrypted | The key opens every sealed file in Git, so whoever reads that Secret, becomes root on the node, or takes the backup file can decrypt all of them. The Secret also sits unencrypted in k3s's datastore and in a manifest file on the node's disk, and the operator's role can read it. If the key is lost, the sealed files cannot be opened and the secrets must be sealed again |
 | Secrets at rest | None here | k3s stores Secrets unencrypted in its datastore unless encryption is switched on |
 
 Out of scope: denial of service beyond quotas and the build limits, and tenants who are actively hostile. For those, builds would need to run in a separate cluster or a VM-based sandbox.
@@ -677,3 +751,4 @@ The Git build spec starts a registry inside the kind cluster, points the operato
 19. [Day 19](https://lnkd.in/p/deSZWa5n)
 20. [Day 20](https://lnkd.in/p/dXHXJynm)
 21. [Day 21](https://lnkd.in/p/dSHdGaCN)
+22. [Day 22](https://lnkd.in/p/dCXkXxiC)

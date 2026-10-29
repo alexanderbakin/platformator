@@ -1,0 +1,23 @@
+# An App served on names of its own as well as its address under the platform
+# domain. Point each name's DNS at the cluster first: a CNAME to
+# shop.<your platform domain>, or an A record to the node's Elastic IP. The
+# README section "Custom domains" has the details.
+apiVersion: platformator.alexanderbakin.com/v1alpha1
+kind: App
+metadata:
+  name: shop
+spec:
+  image: traefik/whoami:latest
+  port: 80
+  domains:
+    - shop.example.org
+    - www.shop.example.org
+  minReplicas: 1
+  maxReplicas: 3
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "50M"
+    limits:
+      cpu: "100m"
+      memory: "100M"

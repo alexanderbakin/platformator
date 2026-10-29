@@ -95,6 +95,21 @@ type AppSpec struct {
 	// controller can.
 	// +optional
 	Network *Network `json:"network,omitempty"`
+
+	// domains are extra hostnames the App is served on, besides its own address
+	// under the platform domain, for example "shop.example.org". Point each
+	// name's DNS at the cluster first (a CNAME to the App's own address, or an
+	// A record to the node): cert-manager gets a certificate for it with the
+	// HTTP-01 challenge, so wildcards are not allowed. A name under the
+	// platform domain, or one that an older App already uses, is skipped and
+	// reported in the DomainsReady condition. The App's own address keeps
+	// working whatever happens to these names.
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=10
+	// +kubebuilder:validation:items:MaxLength=253
+	// +kubebuilder:validation:items:Pattern=`^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
+	Domains []string `json:"domains,omitempty"`
 }
 
 // Network holds the options of the App's NetworkPolicy.
@@ -263,6 +278,7 @@ type AppStatus struct {
 // +kubebuilder:printcolumn:name="URL",type=string,priority=1,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Reconciled",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`
 // +kubebuilder:printcolumn:name="TLS",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="CertificateReady")].status`
+// +kubebuilder:printcolumn:name="Domains",type=string,priority=1,JSONPath=`.status.conditions[?(@.type=="DomainsReady")].status`
 // +kubebuilder:validation:XValidation:rule="self.metadata.name.matches('^[a-z]([-a-z0-9]*[a-z0-9])?$') && size(self.metadata.name) <= 63",message="name must be a DNS label (lowercase letters, digits and dashes, starting with a letter, at most 63 characters) because it becomes the Service name and the hostname"
 
 // App is the Schema for the apps API

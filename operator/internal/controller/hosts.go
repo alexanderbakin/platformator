@@ -52,10 +52,15 @@ func (r *AppReconciler) hostConflict(
 	return nil, nil
 }
 
-// ownsHostBefore reports whether a claimed the shared hostname before b.
+// ownsHostBefore reports whether a claimed a shared name (a hostname or a custom
+// domain) before b. It is a strict order: two different Apps are never equal,
+// so exactly one of them wins.
 func ownsHostBefore(a, b *platformatorv1alpha1.App) bool {
 	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
 		return a.CreationTimestamp.Before(&b.CreationTimestamp)
 	}
-	return a.Namespace < b.Namespace
+	if a.Namespace != b.Namespace {
+		return a.Namespace < b.Namespace
+	}
+	return a.Name < b.Name
 }

@@ -151,6 +151,12 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	var hostTaken *platformatorv1alpha1.App
 	var hostRetry time.Duration
 
+	// domains is the plan for spec.domains. domainsCond is DomainsReady: like
+	// certCond it stays nil until the Ingress has been reconciled, and it
+	// stays nil for an App without custom domains.
+	var domains domainPlan
+	var domainsCond *metav1.Condition
+
 	// This runs right before Reconcile actually returns, whichever of the
 	// return statements below fires. It records two status conditions and
 	// persists them via the status subresource:
@@ -186,12 +192,19 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		if certCond != nil {
 			meta.SetStatusCondition(&app.Status.Conditions, *certCond)
 		}
+		switch {
+		case domainsCond != nil:
+			meta.SetStatusCondition(&app.Status.Conditions, *domainsCond)
+		case len(app.Spec.Domains) == 0:
+			meta.RemoveStatusCondition(&app.Status.Conditions, conditionDomainsReady)
+		}
 		if err == nil {
 			// Certificate changes are not watched (the CRD may not even be
 			// installed), so look again later: soon while it is not issued, and
 			// slowly afterwards, to notice a renewal that fails. Branches are
 			// polled the same way.
-			result.RequeueAfter = soonest(result.RequeueAfter, certificateRequeueAfter(certCond), build.requeue, hostRetry)
+			result.RequeueAfter = soonest(result.RequeueAfter, certificateRequeueAfter(certCond), build.requeue, hostRetry,
+				domainsRequeueAfter(domainsCond))
 		}
 
 		if statusErr := r.Status().Update(ctx, &app); statusErr != nil {
@@ -209,6 +222,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			// update (conflict) does not announce the same change twice.
 			r.emitTransitionEvents(&app, previous, reconciled, ready, certCond)
 			r.emitBuildEvent(&app, previous, builtCond)
+			r.emitDomainsEvent(&app, previous, domainsCond)
 			recordBuild(previous, builtCond, build.took)
 		}
 	}()
@@ -236,7 +250,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		return ctrl.Result{}, fmt.Errorf("reconciling service: %w", err)
 	}
 
-	if err = r.reconcileIngress(ctx, &app); err != nil {
+	if domains, err = r.planDomains(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("planning custom domains: %w", err)
+	}
+	if err = r.reconcileIngress(ctx, &app, domains.serve); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
 	}
 	if err = r.reconcileNetworkPolicy(ctx, &app); err != nil {
@@ -245,6 +262,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	app.Status.URL = "https://" + r.hostFor(&app)
 	tls := r.certificateCondition(ctx, &app)
 	certCond = &tls
+	domainsCond = r.domainsCondition(ctx, &app, domains)
 
 	if err = r.reconcileHPA(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling HPA: %w", err)
@@ -571,25 +589,22 @@ func (r *AppReconciler) reconcileService(ctx context.Context, app *platformatorv
 	return err
 }
 
-func (r *AppReconciler) reconcileIngress(ctx context.Context, app *platformatorv1alpha1.App) error {
+// reconcileIngress serves the App on its own address and on each of domains.
+// Every name has its own TLS entry and Secret, so cert-manager issues one
+// certificate per name: a name that cannot be validated (its DNS does not point
+// here yet) leaves the others alone.
+func (r *AppReconciler) reconcileIngress(
+	ctx context.Context, app *platformatorv1alpha1.App, domains []string,
+) error {
 
 	clusterIssuerName := "letsencrypt"
 	ingressClassName := "traefik"
 	host := r.hostFor(app)
 	pathType := networkingv1.PathTypePrefix
 
-	ing := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
-		if ing.Annotations == nil {
-			ing.Annotations = map[string]string{}
-		}
-		ing.Annotations["cert-manager.io/cluster-issuer"] = clusterIssuerName
-
-		ing.Spec.IngressClassName = &ingressClassName
-		ing.Spec.Rules = []networkingv1.IngressRule{{
-			Host: host,
+	rule := func(name string) networkingv1.IngressRule {
+		return networkingv1.IngressRule{
+			Host: name,
 			IngressRuleValue: networkingv1.IngressRuleValue{
 				HTTP: &networkingv1.HTTPIngressRuleValue{
 					Paths: []networkingv1.HTTPIngressPath{{
@@ -604,11 +619,31 @@ func (r *AppReconciler) reconcileIngress(ctx context.Context, app *platformatorv
 					}},
 				},
 			},
-		}}
+		}
+	}
+
+	ing := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
+		if ing.Annotations == nil {
+			ing.Annotations = map[string]string{}
+		}
+		ing.Annotations["cert-manager.io/cluster-issuer"] = clusterIssuerName
+
+		ing.Spec.IngressClassName = &ingressClassName
+		ing.Spec.Rules = []networkingv1.IngressRule{rule(host)}
 		ing.Spec.TLS = []networkingv1.IngressTLS{{
 			Hosts:      []string{host},
 			SecretName: tlsSecretName(app),
 		}}
+		for _, domain := range domains {
+			ing.Spec.Rules = append(ing.Spec.Rules, rule(domain))
+			ing.Spec.TLS = append(ing.Spec.TLS, networkingv1.IngressTLS{
+				Hosts:      []string{domain},
+				SecretName: domainSecretName(app, domain),
+			})
+		}
 		return controllerutil.SetControllerReference(app, ing, r.Scheme)
 	})
 	return err
@@ -714,14 +749,23 @@ var certificateGVK = schema.GroupVersionKind{Group: "cert-manager.io", Version: 
 func (r *AppReconciler) certificateCondition(
 	ctx context.Context, app *platformatorv1alpha1.App,
 ) metav1.Condition {
-	cond := metav1.Condition{Type: conditionCertificateReady, ObservedGeneration: app.Generation}
+	return r.certificateStatus(ctx, app.Namespace, tlsSecretName(app), app.Generation)
+}
+
+// certificateStatus is the CertificateReady condition of the cert-manager
+// Certificate called name in namespace. The App's own address and each custom
+// domain have one.
+func (r *AppReconciler) certificateStatus(
+	ctx context.Context, namespace, name string, generation int64,
+) metav1.Condition {
+	cond := metav1.Condition{Type: conditionCertificateReady, ObservedGeneration: generation}
 
 	cert := &unstructured.Unstructured{}
 	cert.SetGroupVersionKind(certificateGVK)
-	err := r.Get(ctx, client.ObjectKey{Namespace: app.Namespace, Name: tlsSecretName(app)}, cert)
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, cert)
 	switch {
 	case err == nil:
-		return certificateReadiness(cert, app.Generation)
+		return certificateReadiness(cert, generation)
 	case meta.IsNoMatchError(err):
 		cond.Status = metav1.ConditionUnknown
 		cond.Reason = reasonCertManagerNotInstalled

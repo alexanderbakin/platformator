@@ -7,6 +7,10 @@
     kube_prometheus_stack_version: latest
     loki_version: latest
     alloy_version: latest
+    sealed_secrets_version: latest
+    # Path to key.yaml from sealed-secrets/generate-key.sh. Empty: the controller
+    # makes its own key, and files sealed for another cluster will not open.
+    sealed_secrets_key_file: ""
   tasks:
     - name: Ensure k3s config directory exists
       ansible.builtin.file:
@@ -49,6 +53,19 @@
       ansible.builtin.template:
         src: logging.yaml.j2
         dest: /var/lib/rancher/k3s/server/manifests/04-logging.yaml
+
+    - name: Install the Sealed Secrets key, so files sealed earlier open on this node
+      ansible.builtin.copy:
+        src: "{{ sealed_secrets_key_file }}"
+        dest: /var/lib/rancher/k3s/server/manifests/05-sealed-secrets-key.yaml
+        mode: "0600"
+      no_log: true
+      when: sealed_secrets_key_file | length > 0
+
+    - name: Deploy the Sealed Secrets manifest
+      ansible.builtin.template:
+        src: sealed-secrets.yaml.j2
+        dest: /var/lib/rancher/k3s/server/manifests/06-sealed-secrets.yaml
 
     - name: Install k3s
       ansible.builtin.command: /tmp/k3s

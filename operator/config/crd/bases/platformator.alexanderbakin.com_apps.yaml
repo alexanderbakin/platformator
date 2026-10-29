@@ -40,6 +40,10 @@ spec:
       name: TLS
       priority: 1
       type: string
+    - jsonPath: .status.conditions[?(@.type=="DomainsReady")].status
+      name: Domains
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -65,6 +69,23 @@ spec:
           spec:
             description: spec defines the desired state of App
             properties:
+              domains:
+                description: |-
+                  domains are extra hostnames the App is served on, besides its own address
+                  under the platform domain, for example "shop.example.org". Point each
+                  name's DNS at the cluster first (a CNAME to the App's own address, or an
+                  A record to the node): cert-manager gets a certificate for it with the
+                  HTTP-01 challenge, so wildcards are not allowed. A name under the
+                  platform domain, or one that an older App already uses, is skipped and
+                  reported in the DomainsReady condition. The App's own address keeps
+                  working whatever happens to these names.
+                items:
+                  maxLength: 253
+                  pattern: ^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z]([-a-z0-9]{0,61}[a-z0-9])?$
+                  type: string
+                maxItems: 10
+                type: array
+                x-kubernetes-list-type: set
               env:
                 items:
                   description: EnvVar represents an environment variable present in

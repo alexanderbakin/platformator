@@ -5,7 +5,10 @@ metadata:
 spec:
   acme:
     server: https://acme-v02.api.letsencrypt.org/directory
-    email: "{{ lookup('env', 'ACME_EMAIL') | mandatory }}"
+{% set acme_email = lookup('env', 'ACME_EMAIL') | default('', true) %}
+{% if acme_email %}
+    email: "{{ acme_email }}"
+{% endif %}
     privateKeySecretRef:
       name: letsencrypt-account-key
     solvers:

@@ -55,3 +55,7 @@ Backups.backupdb
 .MobileBackups.trash
 MobileBackups.trash
 tmbootpicker.efi
+
+# Sealed Secrets private key and its working files, never commit them
+sealed-secrets/*.yaml
+sealed-secrets/*.key
