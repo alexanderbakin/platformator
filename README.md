@@ -752,3 +752,4 @@ The Git build spec starts a registry inside the kind cluster, points the operato
 20. [Day 20](https://lnkd.in/p/dXHXJynm)
 21. [Day 21](https://lnkd.in/p/dSHdGaCN)
 22. [Day 22](https://lnkd.in/p/dCXkXxiC)
+23. [Day 23](https://lnkd.in/p/dy8-_5b4)
