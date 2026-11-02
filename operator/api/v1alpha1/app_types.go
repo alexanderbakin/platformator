@@ -119,13 +119,17 @@ type Network struct {
 	// +optional
 	AllowSameNamespace bool `json:"allowSameNamespace,omitempty"`
 
-	// allowPrivateEgress lets the App connect to private addresses outside the
-	// cluster, for example a database in the VPC. By default only DNS, the
-	// pods of the App's namespace and the public internet are reachable. The
-	// cloud metadata address and the cluster's own pod and Service ranges stay
-	// blocked either way.
+	// allowEgressTo lists private addresses outside the cluster that the App
+	// may connect to, for example a database in the VPC (10.0.2.15/32). By
+	// default only DNS, the pods of the App's namespace and the public
+	// internet are reachable. List the narrowest ranges that work: the node
+	// and the Kubernetes API are private addresses too. The cloud metadata
+	// range (169.254.0.0/16) is never reachable, even if it is listed here.
 	// +optional
-	AllowPrivateEgress bool `json:"allowPrivateEgress,omitempty"`
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:items:Pattern=`^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/(3[0-2]|[12]?[0-9])$`
+	AllowEgressTo []string `json:"allowEgressTo,omitempty"`
 }
 
 // Security holds the hardening options that can break images, so they are

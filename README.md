@@ -88,7 +88,7 @@ Each entry says what was chosen, why, and what it costs.
 
 **Hardening that can break an image is opt-in.** No privilege escalation and the default seccomp profile are always on. Non-root, a read-only filesystem and dropped capabilities are `spec.security` options, because a default that stops nginx or postgres from starting is a worse platform than one that asks. Cost: Apps are not hardened until someone asks.
 
-**Network isolation covers egress with a fixed allow-list, not per-App destinations.** Every App gets a policy that lets only the ingress controller in, and its pods may reach DNS, their own namespace and the public internet, not the API server, the node, the VPC, other tenants or the metadata address. Listing destinations per App would be too much to ask of a small platform, so one rule fits all, and `allowPrivateEgress` is the single escape hatch for databases in the VPC. Cost: an App can still reach any public address, so data can leave, and an App that needs a private service outside the cluster has to ask for all private ranges. Build pods keep open egress for now.
+**Network isolation covers egress with a fixed allow-list, plus explicit ranges.** Every App gets a policy that lets only the ingress controller in, and its pods may reach DNS, their own namespace and the public internet, not the API server, the node, the VPC, other tenants or the metadata address. An App that needs something private lists its address in `allowEgressTo`. A boolean "allow private networks" was tried first and dropped: the Service address of the API server is translated to the node's own address before the policy is checked, so excluding the cluster ranges did not keep the API server out. Cost: an App can still reach any public address, so data can leave, and the operator cannot tell a useful range from a harmful one, so it trusts whoever can edit the App. Build pods keep open egress for now.
 
 **The oldest App keeps a hostname.** An App is served on `<name>.<domain>` with no namespace in it, so same-named Apps would collide. Putting the namespace in the hostname would fix that but change every URL, so the older App keeps the address and the newer one waits with `HostTaken`. Cost: whoever creates a name first holds it.
 
@@ -565,10 +565,11 @@ An App that another App must call through its Service, or that needs a database 
 spec:
   network:
     allowSameNamespace: true     # every pod in this namespace may connect to it
-    allowPrivateEgress: true     # it may reach private addresses outside the cluster
+    allowEgressTo:               # private addresses outside the cluster it may connect to
+      - 10.0.2.15/32             # the database
 ```
 
-`allowPrivateEgress` opens the private ranges except the cluster's own pod and Service ranges (`--cluster-cidrs`, default `10.42.0.0/16,10.43.0.0/16` for k3s) and the metadata range, which stay closed. A database in the same VPC then works; a Service in another namespace does not. Build Jobs are not covered by these egress rules yet.
+List the narrowest ranges that work. The node and the Kubernetes API are private addresses too, so a wide range such as `10.0.0.0/8` gives the App access to both (they still ask for credentials). The cloud metadata range `169.254.0.0/16` is never reachable, even if a listed range covers it. Blocked connections are refused rather than left to time out, because kube-router rejects them. Build Jobs are not covered by these egress rules yet.
 
 The policy needs a CNI that enforces NetworkPolicy. k3s does (it ships kube-router for this).
 

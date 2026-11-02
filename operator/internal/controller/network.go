@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"net/netip"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -49,12 +50,13 @@ const (
 	linkLocalCIDR = "169.254.0.0/16"
 )
 
-// DefaultClusterCIDRs are the pod and Service ranges of a default k3s cluster.
-var DefaultClusterCIDRs = []string{"10.42.0.0/16", "10.43.0.0/16"}
-
 // privateCIDRs are the private IPv4 ranges. An App cannot reach them by default,
-// which covers the node, the VPC and every cluster address on a default k3s.
+// which covers the node, the Kubernetes API, the VPC and every cluster address
+// on a default k3s.
 var privateCIDRs = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+
+// linkLocal is the range of the cloud metadata address. No App reaches it.
+var linkLocal = netip.MustParsePrefix(linkLocalCIDR)
 
 // reconcileNetworkPolicy makes the App's pods reachable only from the ingress
 // controller, and only on the App's port. With spec.network.allowSameNamespace,
@@ -62,9 +64,9 @@ var privateCIDRs = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
 //
 // Egress is limited as well: the App may resolve names, reach the pods of its
 // own namespace and reach the public internet, but not other namespaces, the
-// Kubernetes API, the node or the cloud metadata address. With
-// spec.network.allowPrivateEgress it may also reach private addresses outside
-// the cluster, such as a database in the VPC.
+// Kubernetes API, the node or the cloud metadata address. The ranges in
+// spec.network.allowEgressTo are added to that, for example a database in the
+// VPC.
 func (r *AppReconciler) reconcileNetworkPolicy(ctx context.Context, app *platformatorv1alpha1.App) error {
 	ingressNamespace := r.IngressNamespace
 	if ingressNamespace == "" {
@@ -85,7 +87,6 @@ func (r *AppReconciler) reconcileNetworkPolicy(ctx context.Context, app *platfor
 	}
 	protocol := corev1.ProtocolTCP
 	port := intstr.FromInt32(app.Spec.Port)
-	allowPrivate := app.Spec.Network != nil && app.Spec.Network.AllowPrivateEgress
 
 	policy := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: app.Name, Namespace: app.Namespace},
@@ -98,7 +99,7 @@ func (r *AppReconciler) reconcileNetworkPolicy(ctx context.Context, app *platfor
 				From:  peers,
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &protocol, Port: &port}},
 			}},
-			Egress: r.egressRules(allowPrivate),
+			Egress: egressRules(app),
 		}
 		return controllerutil.SetControllerReference(app, policy, r.Scheme)
 	})
@@ -106,24 +107,14 @@ func (r *AppReconciler) reconcileNetworkPolicy(ctx context.Context, app *platfor
 }
 
 // egressRules lists what an App's pods may connect to: cluster DNS, the pods of
-// their own namespace (each of which still applies its own ingress policy) and
-// the internet. The internet rule excludes the cloud metadata range and either
-// every private range or, when allowPrivate is set, only the cluster's own
-// pod and Service ranges.
-func (r *AppReconciler) egressRules(allowPrivate bool) []networkingv1.NetworkPolicyEgressRule {
+// their own namespace (each of which still applies its own ingress policy), the
+// internet and the ranges in spec.network.allowEgressTo. The internet rule
+// excludes the cloud metadata range and every private range.
+func egressRules(app *platformatorv1alpha1.App) []networkingv1.NetworkPolicyEgressRule {
 	udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
 	dnsPort := intstr.FromInt32(53)
 
-	except := append([]string{linkLocalCIDR}, privateCIDRs...)
-	if allowPrivate {
-		clusterCIDRs := r.ClusterCIDRs
-		if len(clusterCIDRs) == 0 {
-			clusterCIDRs = DefaultClusterCIDRs
-		}
-		except = append([]string{linkLocalCIDR}, clusterCIDRs...)
-	}
-
-	return []networkingv1.NetworkPolicyEgressRule{
+	rules := []networkingv1.NetworkPolicyEgressRule{
 		{
 			To: []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: &metav1.LabelSelector{
@@ -144,8 +135,42 @@ func (r *AppReconciler) egressRules(allowPrivate bool) []networkingv1.NetworkPol
 		},
 		{
 			To: []networkingv1.NetworkPolicyPeer{{
-				IPBlock: &networkingv1.IPBlock{CIDR: "0.0.0.0/0", Except: except},
+				IPBlock: &networkingv1.IPBlock{
+					CIDR:   "0.0.0.0/0",
+					Except: append([]string{linkLocalCIDR}, privateCIDRs...),
+				},
 			}},
 		},
 	}
+
+	if app.Spec.Network != nil {
+		if peers := allowedPeers(app.Spec.Network.AllowEgressTo); len(peers) > 0 {
+			rules = append(rules, networkingv1.NetworkPolicyEgressRule{To: peers})
+		}
+	}
+	return rules
+}
+
+// allowedPeers turns the ranges of spec.network.allowEgressTo into policy
+// peers. The metadata range is never allowed: a range inside it is dropped, and
+// a wider range keeps it as an exception. A value that is not an IPv4 range is
+// dropped too (the CRD already refuses it).
+func allowedPeers(cidrs []string) []networkingv1.NetworkPolicyPeer {
+	var peers []networkingv1.NetworkPolicyPeer
+	for _, value := range cidrs {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		prefix = prefix.Masked()
+		block := &networkingv1.IPBlock{CIDR: prefix.String()}
+		if prefix.Overlaps(linkLocal) {
+			if prefix.Bits() >= linkLocal.Bits() {
+				continue
+			}
+			block.Except = []string{linkLocalCIDR}
+		}
+		peers = append(peers, networkingv1.NetworkPolicyPeer{IPBlock: block})
+	}
+	return peers
 }

@@ -125,17 +125,31 @@ var _ = Describe("App tenancy", func() {
 			Expect(internet.Except).To(ConsistOf(linkLocalCIDR, "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 		})
 
-		It("opens private addresses outside the cluster when asked to, but not the metadata range or the cluster", func() {
-			app := validApp("netpol-private")
-			app.Spec.Network = &platformatorv1alpha1.Network{AllowPrivateEgress: true}
+		It("adds only the listed ranges, and never the metadata range", func() {
+			app := validApp("netpol-allow-to")
+			app.Spec.Network = &platformatorv1alpha1.Network{
+				AllowEgressTo: []string{"10.0.2.15/32", "169.254.169.254/32", "0.0.0.0/0", "10.0.3.7/24"},
+			}
 			Expect(k8sClient.Create(ctx, app)).To(Succeed())
 			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, app)).To(Succeed()) })
 			reconcileApp(app)
 
 			policy := &networkingv1.NetworkPolicy{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, policy)).To(Succeed())
-			internet := policy.Spec.Egress[2].To[0].IPBlock
-			Expect(internet.Except).To(ConsistOf(append([]string{linkLocalCIDR}, DefaultClusterCIDRs...)))
+			Expect(policy.Spec.Egress).To(HaveLen(4))
+			peers := policy.Spec.Egress[3].To
+			Expect(peers).To(HaveLen(3), "the range inside the metadata range is dropped")
+			Expect(peers[0].IPBlock.CIDR).To(Equal("10.0.2.15/32"))
+			Expect(peers[0].IPBlock.Except).To(BeEmpty())
+			Expect(peers[1].IPBlock.CIDR).To(Equal("0.0.0.0/0"))
+			Expect(peers[1].IPBlock.Except).To(ConsistOf(linkLocalCIDR), "a wider range keeps the metadata range out")
+			Expect(peers[2].IPBlock.CIDR).To(Equal("10.0.3.0/24"), "the range is masked")
+		})
+
+		It("refuses a range that is not an IPv4 CIDR", func() {
+			app := validApp("netpol-bad-cidr")
+			app.Spec.Network = &platformatorv1alpha1.Network{AllowEgressTo: []string{"database.internal"}}
+			Expect(k8sClient.Create(ctx, app)).NotTo(Succeed())
 		})
 	})
 

@@ -13,7 +13,7 @@ release and `<latest tag>-build.<N>` on every other push to `main`.
 - Private repositories over SSH: `spec.source.git.deployKeySecret` with an SSH address, host keys pinned from the Secret's `known_hosts`, and a clone in an init container so the key never reaches the build container.
 
 ### Changed
-- An App's NetworkPolicy now limits egress to cluster DNS, the pods of its own namespace and the public internet, so it can no longer reach other namespaces, the Kubernetes API, the node, the VPC or the cloud metadata address. `spec.network.allowPrivateEgress` opens private addresses outside the cluster, and `--cluster-cidrs` names the ranges that stay closed. Build Jobs are unchanged. An App that called a private address before now needs `allowPrivateEgress`.
+- An App's NetworkPolicy now limits egress to cluster DNS, the pods of its own namespace and the public internet, so it can no longer reach other namespaces, the Kubernetes API, the node, the VPC or the cloud metadata address. `spec.network.allowEgressTo` lists private ranges outside the cluster that it may reach, and the metadata range stays closed. Build Jobs are unchanged. An App that called a private address before now needs `allowEgressTo`.
 - k3s encrypts Secrets in its datastore (`secrets-encryption: true`). It is set at install, so an existing cluster needs a rotation or a rebuild.
 - `ACME_EMAIL` is optional: the Let's Encrypt `ClusterIssuer` leaves out its contact address when it is empty.
 - The EC2 instance accepts only IMDSv2, has an encrypted root volume and is EBS-optimized, the security group rules have descriptions, and the VPC's default security group has no rules. Changing the root volume replaces the instance, so apply it on a fresh cluster.
