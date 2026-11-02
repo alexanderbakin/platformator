@@ -88,7 +88,7 @@ Each entry says what was chosen, why, and what it costs.
 
 **Hardening that can break an image is opt-in.** No privilege escalation and the default seccomp profile are always on. Non-root, a read-only filesystem and dropped capabilities are `spec.security` options, because a default that stops nginx or postgres from starting is a worse platform than one that asks. Cost: Apps are not hardened until someone asks.
 
-**Network isolation allows only ingress, not egress.** Every App gets a policy that lets only the ingress controller in. Restricting egress as well would stop Apps from reaching the internet and databases until each one listed its destinations, which is too much to ask of a small platform. Cost: a compromised App can still reach out, and `allowSameNamespace` is the only way for Apps to call each other.
+**Network isolation covers egress with a fixed allow-list, not per-App destinations.** Every App gets a policy that lets only the ingress controller in, and its pods may reach DNS, their own namespace and the public internet, not the API server, the node, the VPC, other tenants or the metadata address. Listing destinations per App would be too much to ask of a small platform, so one rule fits all, and `allowPrivateEgress` is the single escape hatch for databases in the VPC. Cost: an App can still reach any public address, so data can leave, and an App that needs a private service outside the cluster has to ask for all private ranges. Build pods keep open egress for now.
 
 **The oldest App keeps a hostname.** An App is served on `<name>.<domain>` with no namespace in it, so same-named Apps would collide. Putting the namespace in the hostname would fix that but change every URL, so the older App keeps the address and the newer one waits with `HostTaken`. Cost: whoever creates a name first holds it.
 
@@ -236,7 +236,7 @@ Run the playbook:
 ansible-playbook playbook.yml
 ```
 
-This installs and starts k3s, bootstraps cert-manager and a `letsencrypt` `ClusterIssuer` via k3s's manifest auto-deploy (`/var/lib/rancher/k3s/server/manifests` - no Helm or manual `kubectl apply` needed), and fetches the kubeconfig back to `ansible/kubeconfig`, already patched to point at the node's public IP instead of `127.0.0.1`.
+This installs and starts k3s, bootstraps cert-manager and a `letsencrypt` `ClusterIssuer` via k3s's manifest auto-deploy (`/var/lib/rancher/k3s/server/manifests` - no Helm or manual `kubectl apply` needed), turns on Secret encryption in the datastore (`sudo k3s secrets-encrypt status` on the node shows it), and fetches the kubeconfig back to `ansible/kubeconfig`, already patched to point at the node's public IP instead of `127.0.0.1`.
 
 The `ClusterIssuer` uses the HTTP-01 challenge type against the k3s-bundled Traefik, so no DNS-provider API credentials are needed - port 80 is already open (see `terraform/main.tf`).
 
@@ -549,15 +549,26 @@ What to know:
 
 ### Network isolation
 
-Every App gets a NetworkPolicy named after it. Only the ingress controller's pods (Traefik in `kube-system` on k3s, set with `--ingress-namespace`) may connect, and only to the App's port. Pods of other Apps and other namespaces cannot reach it, and neither can anything else in the cluster. Egress is not restricted: Apps need the internet and their databases.
+Every App gets a NetworkPolicy named after it. Only the ingress controller's pods (Traefik in `kube-system` on k3s, set with `--ingress-namespace`) may connect, and only to the App's port. Pods of other Apps and other namespaces cannot reach it, and neither can anything else in the cluster.
 
-An App that another App must call through its Service opts in:
+Egress is limited too. An App's pods may reach:
+
+- cluster DNS (CoreDNS in `kube-system`), on port 53;
+- the other pods of their own namespace, each of which still applies its own ingress policy;
+- the public internet.
+
+Everything else is closed: other namespaces, the Kubernetes API, the node, the VPC and the cloud metadata address (`169.254.169.254`). The internet rule is `0.0.0.0/0` minus `169.254.0.0/16` and the private ranges `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16`.
+
+An App that another App must call through its Service, or that needs a database in the VPC, opts in:
 
 ```yaml
 spec:
   network:
-    allowSameNamespace: true   # every pod in this namespace may connect
+    allowSameNamespace: true     # every pod in this namespace may connect to it
+    allowPrivateEgress: true     # it may reach private addresses outside the cluster
 ```
+
+`allowPrivateEgress` opens the private ranges except the cluster's own pod and Service ranges (`--cluster-cidrs`, default `10.42.0.0/16,10.43.0.0/16` for k3s) and the metadata range, which stay closed. A database in the same VPC then works; a Service in another namespace does not. Build Jobs are not covered by these egress rules yet.
 
 The policy needs a CNI that enforces NetworkPolicy. k3s does (it ships kube-router for this).
 
@@ -588,11 +599,11 @@ This is soft multi-tenancy for teams that trust each other, not isolation for ho
 | A build reaches other things in the cluster | Nothing in the build pod holds a cluster credential | Its egress is open, so it can connect to cluster services and the internet |
 | The registry token leaks | It lives in a per-namespace Secret, mounted only into the build container, not into the build steps | The token is a personal access token with broad scopes (see Design Decisions). Anyone who can read the Secret, or compromise BuildKit, gets it. One registry account holds all images, so that token can overwrite any tenant's image |
 | The operator is compromised | It reads only the metadata of Secrets and ConfigMaps | Its role can read every Secret and ConfigMap in the cluster (Kubernetes cannot grant metadata-only access) and create workloads everywhere |
-| One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik (if the CNI enforces it; k3s does, plain flannel would accept the policies and ignore them), quotas cap usage, the older App keeps a hostname | Egress is open, the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
+| One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik (if the CNI enforces it; k3s does, plain flannel would accept the policies and ignore them), quotas cap usage, the older App keeps a hostname | App egress is limited to DNS, its namespace and the internet (build pods are still open), the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
 | A tenant claims a domain it does not own | A name must pass the HTTP-01 challenge, so a certificate is issued only if its DNS points at this cluster. Names under the platform domain are refused, and the older App keeps a contested name | Nothing checks who owns a name: the first App to list it holds it. A tenant can sit on a name another team wants, and a name whose DNS already points at the node is served, with a certificate, for whoever claimed it first |
 | Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by tag, not digest. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
-| The Sealed Secrets key leaks | It is made once outside the repo, kept in a file that is not committed, and lives in the cluster as one Secret in `kube-system`, which no tenant Role can read. On the node the Ansible copy is root-only (mode 0600) and the root volume is encrypted | The key opens every sealed file in Git, so whoever reads that Secret, becomes root on the node, or takes the backup file can decrypt all of them. The Secret also sits unencrypted in k3s's datastore and in a manifest file on the node's disk, and the operator's role can read it. If the key is lost, the sealed files cannot be opened and the secrets must be sealed again |
-| Secrets at rest | None here | k3s stores Secrets unencrypted in its datastore unless encryption is switched on |
+| The Sealed Secrets key leaks | It is made once outside the repo, kept in a file that is not committed, and lives in the cluster as one Secret in `kube-system`, which no tenant Role can read. k3s encrypts Secrets in its datastore, and on the node the Ansible copy is root-only (mode 0600) and the root volume is encrypted | The key opens every sealed file in Git, so whoever reads that Secret, becomes root on the node, or takes the backup file can decrypt all of them. The datastore encryption does not help against that: k3s keeps its encryption key on the node, and the API returns Secrets decrypted. The key also sits in plain text in a manifest file on the node's disk, and the operator's role can read it. If the key is lost, the sealed files cannot be opened and the secrets must be sealed again |
+| Secrets at rest | k3s encrypts Secrets in its datastore (`secrets-encryption`, set in the Ansible-written k3s config), so they are not in plain text in the database files or in snapshots, and the root volume is encrypted | The encryption key is on the node, so root on the node still reads everything, and the API returns Secrets decrypted to anyone whose role allows it. Files that Ansible copies to the node, such as the sealing key manifest, are plain text on disk. Turning encryption on for an existing cluster needs a rotation, which a fresh install avoids |
 
 Out of scope: denial of service beyond quotas and the build limits, and tenants who are actively hostile. For those, builds would need to run in a separate cluster or a VM-based sandbox.
 

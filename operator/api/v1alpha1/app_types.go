@@ -118,6 +118,14 @@ type Network struct {
 	// for example another App that calls this one through its Service.
 	// +optional
 	AllowSameNamespace bool `json:"allowSameNamespace,omitempty"`
+
+	// allowPrivateEgress lets the App connect to private addresses outside the
+	// cluster, for example a database in the VPC. By default only DNS, the
+	// pods of the App's namespace and the public internet are reachable. The
+	// cloud metadata address and the cluster's own pod and Service ranges stay
+	// blocked either way.
+	// +optional
+	AllowPrivateEgress bool `json:"allowPrivateEgress,omitempty"`
 }
 
 // Security holds the hardening options that can break images, so they are

@@ -89,6 +89,11 @@ type AppReconciler struct {
 	// connect to an App. It defaults to kube-system, where k3s runs Traefik.
 	IngressNamespace string
 
+	// ClusterCIDRs are the cluster's pod and Service ranges. An App never
+	// reaches them except through its own namespace. It defaults to the ranges
+	// of a default k3s cluster.
+	ClusterCIDRs []string
+
 	// Recorder publishes Kubernetes Events about each App, visible in
 	// `kubectl describe app`. It may be nil (tests), then no events are sent.
 	Recorder events.EventRecorder

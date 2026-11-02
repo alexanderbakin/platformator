@@ -75,7 +75,7 @@ var _ = Describe("App tenancy", func() {
 
 			policy := &networkingv1.NetworkPolicy{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, policy)).To(Succeed())
-			Expect(policy.Spec.PolicyTypes).To(ConsistOf(networkingv1.PolicyTypeIngress))
+			Expect(policy.Spec.PolicyTypes).To(ConsistOf(networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress))
 			Expect(policy.Spec.PodSelector.MatchLabels).To(Equal(labelsFor(app)))
 			Expect(policy.Spec.Ingress).To(HaveLen(1))
 			rule := policy.Spec.Ingress[0]
@@ -100,6 +100,42 @@ var _ = Describe("App tenancy", func() {
 			Expect(sameNamespace.NamespaceSelector).To(BeNil(), "no namespace selector means the policy's own namespace")
 			Expect(sameNamespace.PodSelector).NotTo(BeNil())
 			Expect(sameNamespace.PodSelector.MatchLabels).To(BeEmpty())
+		})
+
+		It("limits egress to DNS, its own namespace and the public internet", func() {
+			app := validApp("netpol-egress")
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, app)).To(Succeed()) })
+			reconcileApp(app)
+
+			policy := &networkingv1.NetworkPolicy{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, policy)).To(Succeed())
+			Expect(policy.Spec.Egress).To(HaveLen(3))
+
+			dns := policy.Spec.Egress[0]
+			Expect(dns.To[0].PodSelector.MatchLabels).To(HaveKeyWithValue(dnsLabelKey, dnsLabelVal))
+			Expect(dns.Ports).To(HaveLen(2))
+
+			own := policy.Spec.Egress[1]
+			Expect(own.To[0].NamespaceSelector).To(BeNil(), "no namespace selector means the policy's own namespace")
+			Expect(own.To[0].PodSelector.MatchLabels).To(BeEmpty())
+
+			internet := policy.Spec.Egress[2].To[0].IPBlock
+			Expect(internet.CIDR).To(Equal("0.0.0.0/0"))
+			Expect(internet.Except).To(ConsistOf(linkLocalCIDR, "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+		})
+
+		It("opens private addresses outside the cluster when asked to, but not the metadata range or the cluster", func() {
+			app := validApp("netpol-private")
+			app.Spec.Network = &platformatorv1alpha1.Network{AllowPrivateEgress: true}
+			Expect(k8sClient.Create(ctx, app)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, app)).To(Succeed()) })
+			reconcileApp(app)
+
+			policy := &networkingv1.NetworkPolicy{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, policy)).To(Succeed())
+			internet := policy.Spec.Egress[2].To[0].IPBlock
+			Expect(internet.Except).To(ConsistOf(append([]string{linkLocalCIDR}, DefaultClusterCIDRs...)))
 		})
 	})
 

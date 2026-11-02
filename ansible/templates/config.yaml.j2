@@ -2,3 +2,7 @@ write-kubeconfig-mode: "0644"
 tls-san:
   - "{{ ansible_host }}"
   - "{{ lookup('env', 'DOMAIN') | mandatory }}"
+# Encrypts Secrets in the datastore, so they are not in plain text in the
+# database files or snapshots. Set on a fresh install: turning it on later
+# needs a rotation.
+secrets-encryption: true

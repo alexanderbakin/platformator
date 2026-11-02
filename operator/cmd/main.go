@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -88,12 +89,16 @@ func main() {
 	var buildTimeout time.Duration
 	var maxBuilds int
 	var ingressNamespace string
+	var clusterCIDRs string
 	flag.DurationVar(&buildTimeout, "build-timeout", controller.DefaultBuildTimeout,
 		"Stop a build Job that runs longer than this. 0 disables the limit.")
 	flag.IntVar(&maxBuilds, "max-builds", 2,
 		"How many builds may run at once in the whole cluster; the rest wait. 0 disables the limit.")
 	flag.StringVar(&ingressNamespace, "ingress-namespace", "kube-system",
 		"Namespace of the ingress controller; only its pods may connect to an App (k3s runs Traefik in kube-system).")
+	flag.StringVar(&clusterCIDRs, "cluster-cidrs", strings.Join(controller.DefaultClusterCIDRs, ","),
+		"Comma-separated pod and Service ranges of the cluster, which an App cannot reach even with "+
+			"allowPrivateEgress (k3s defaults).")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -235,6 +240,7 @@ func main() {
 		BuildTimeout:     buildTimeout,
 		MaxBuilds:        maxBuilds,
 		IngressNamespace: ingressNamespace,
+		ClusterCIDRs:     splitCIDRs(clusterCIDRs),
 		Triggers:         triggers,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")
@@ -275,4 +281,15 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// splitCIDRs turns a comma-separated flag value into a list, without blanks.
+func splitCIDRs(value string) []string {
+	var cidrs []string
+	for part := range strings.SplitSeq(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			cidrs = append(cidrs, part)
+		}
+	}
+	return cidrs
 }
