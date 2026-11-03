@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 23 of 30.
+Day 25 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -88,7 +88,9 @@ Each entry says what was chosen, why, and what it costs.
 
 **Hardening that can break an image is opt-in.** No privilege escalation and the default seccomp profile are always on. Non-root, a read-only filesystem and dropped capabilities are `spec.security` options, because a default that stops nginx or postgres from starting is a worse platform than one that asks. Cost: Apps are not hardened until someone asks.
 
-**Network isolation covers egress with a fixed allow-list, plus explicit ranges.** Every App gets a policy that lets only the ingress controller in, and its pods may reach DNS, their own namespace and the public internet, not the API server, the node, the VPC, other tenants or the metadata address. An App that needs something private lists its address in `allowEgressTo`. A boolean "allow private networks" was tried first and dropped: the Service address of the API server is translated to the node's own address before the policy is checked, so excluding the cluster ranges did not keep the API server out. Cost: an App can still reach any public address, so data can leave, and the operator cannot tell a useful range from a harmful one, so it trusts whoever can edit the App. Build pods keep open egress for now.
+**Network isolation covers egress with a fixed allow-list, plus explicit ranges.** Every App gets a policy that lets only the ingress controller in, and its pods may reach DNS, their own namespace and the public internet, not the API server, the node, the VPC, other tenants or the metadata address. An App that needs something private lists its address in `allowEgressTo`. A boolean "allow private networks" was tried first and dropped: the Service address of the API server is translated to the node's own address before the policy is checked, so excluding the cluster ranges did not keep the API server out. The ranges an App may ask for are capped by an annotation on its namespace, which only the platform admin can set (see Network isolation), because tenants can edit their own Apps. Cost: an App can still reach any public address, so data can leave, and the admin has to know which ranges a team needs. Build pods have their own, narrower policy (see the next decision).
+
+**Build pods get their own network policy, and Pod Security stays warn-only.** A build runs a Dockerfile, which is arbitrary code, so the build pods of a namespace share one policy (`platformator-builds`): DNS and the public internet only, with the private ranges and the metadata address closed, and nothing may connect in. A local HTTP registry inside the cluster (`REGISTRY_INSECURE`, used by the e2e test) would be cut off by that, so the policy is skipped in that mode. Enforcing the Pod Security `baseline` profile in tenant namespaces would need the build pods, which run with seccomp and AppArmor unconfined, in a namespace of their own. That means copying the registry and deploy-key Secrets into it for each build and watching Jobs across namespaces, and the gain is small: tenants cannot create pods (their Role has no `pods` or `jobs` create), and every pod comes from the operator or a controller. Cost: the unconfined profile stays on the build pods, and a mistake in the operator that produced a privileged pod would only be warned about.
 
 **The oldest App keeps a hostname.** An App is served on `<name>.<domain>` with no namespace in it, so same-named Apps would collide. Putting the namespace in the hostname would fix that but change every URL, so the older App keeps the address and the newer one waits with `HostTaken`. Cost: whoever creates a name first holds it.
 
@@ -123,6 +125,8 @@ Each entry says what was chosen, why, and what it costs.
 **Secrets are committed sealed, with a key that lives outside the cluster.** Sealed Secrets encrypts a Secret to a public certificate, so the encrypted file can sit in Git next to the App manifests, and a controller in the cluster turns it back into an ordinary Secret. The operator needs no change, because Apps already read ordinary Secrets through `envFrom`. The catch with a node that is destroyed often is the private key: the controller makes its own on first start, and files sealed for the last cluster would not open on the next one. So I generate the key pair once with a script, keep the private half in a file outside the repo, and Ansible installs it before the controller starts, with key renewal turned off so there is exactly one key. Cost: that file is the one thing to back up, losing it means sealing every secret again, and whoever holds it can open every sealed file.
 
 **External Secrets and the Secrets Store CSI driver were considered and left out.** The External Secrets Operator would keep the values in AWS, which survives the cluster with no key to back up, but a pod has to authenticate to AWS to read them. The node accepts only IMDSv2 and leaves the hop limit at its default of 1, so pods cannot reach the instance's credentials, which is the point of that setting. Allowing it would give every pod on the node a route to the node's role, and a static IAM key would need a Secret created by hand, the problem being solved. The CSI driver mounts values as files and mirrors them into a Secret only while a pod mounts them, which does not fit `envFrom`, build Jobs or the operator's own Secrets without changing what the operator creates. Cost: no central store to rotate from. On a cluster with a per-pod AWS identity (EKS, for example) External Secrets would be the better answer.
+
+**GitOps (Flux or Argo CD) is left out.** The operator already reconciles every App into its Deployment, Service, Ingress and certificates, and the platform runs on one node that is rebuilt from scratch with Ansible and `make deploy-image`. A second reconciliation loop over the platform itself would add a control plane to run, with its own bootstrap and ordering (CRD before operator, the domain substituted into manifests), and would close none of the multi-tenant gaps that matter more here. Cost: nothing compares the cluster to Git after the install, so a hand edit to the operator Deployment or an Issuer stays until the next deploy, and an upgrade is a manual `make deploy-image`. It would start to pay off on a long-lived or shared cluster.
 
 ## Getting started
 
@@ -459,6 +463,8 @@ Build safety:
 - Build pods ask for 250m CPU and 512Mi and may use 1 CPU and 1.5Gi, so a ResourceQuota accepts them and one build cannot starve the node.
 - BuildKit keeps a layer cache in `<REGISTRY>/<namespace>-<name>:buildcache`, so a build reuses unchanged layers.
 
+Build pods can reach DNS and the public internet only: not the node, the Kubernetes API, the VPC, other pods or the cloud metadata address, and nothing can connect to them. One policy, `platformator-builds`, covers the build pods of the namespace and stays after the last App is gone, until the namespace is deleted.
+
 Limits for now: one Dockerfile build per commit, and the BuildKit Job runs rootless with seccomp and AppArmor unconfined, which the node must allow. Old images and the cache stay in the registry; deleting them needs a token scope the operator does not hold.
 
 ### Private repositories
@@ -569,7 +575,19 @@ spec:
       - 10.0.2.15/32             # the database
 ```
 
-List the narrowest ranges that work. The node and the Kubernetes API are private addresses too, so a wide range such as `10.0.0.0/8` gives the App access to both (they still ask for credentials). The cloud metadata range `169.254.0.0/16` is never reachable, even if a listed range covers it. Blocked connections are refused rather than left to time out, because kube-router rejects them. Build Jobs are not covered by these egress rules yet.
+`allowEgressTo` is a request, not a grant: tenants can edit their own Apps, so the platform admin sets the ceiling on the team's Namespace, which tenants cannot edit:
+
+```yaml
+kind: Namespace
+metadata:
+  name: team-a
+  annotations:
+    platformator.alexanderbakin.com/egress-allowed: "10.0.2.0/24"   # the database subnet
+```
+
+A listed range inside the ceiling (`10.0.2.15/32`) is added to the policy. A range outside it (`10.0.0.98/32`, the node) is ignored, and the App gets an `EgressAllowed` condition set to False, with an event, naming the refused ranges. Without the annotation nothing private is reachable. `examples/tenant` has the annotation commented out.
+
+Within the ceiling, list the narrowest ranges that work. The node and the Kubernetes API are private addresses too, so a wide range such as `10.0.0.0/8` gives the App access to both (they still ask for credentials). The cloud metadata range `169.254.0.0/16` is never reachable, even if the ceiling or a listed range covers it. Blocked connections are refused rather than left to time out, because kube-router rejects them. Build pods have their own policy (see Building from Git).
 
 The policy needs a CNI that enforces NetworkPolicy. k3s does (it ships kube-router for this).
 
@@ -597,12 +615,13 @@ This is soft multi-tenancy for teams that trust each other, not isolation for ho
 | Risk | What limits it | What remains |
 |---|---|---|
 | A Dockerfile runs arbitrary commands during a build | The build is rootless (uid 1000), not privileged, has CPU and memory limits, a timeout and a concurrency limit, and builds only public repositories at an exact commit | The pod runs with seccomp and AppArmor unconfined, which widens the kernel attack surface. A BuildKit or kernel escape would reach the node and every tenant on it |
-| A build reaches other things in the cluster | Nothing in the build pod holds a cluster credential | Its egress is open, so it can connect to cluster services and the internet |
+| A build reaches other things in the cluster | Nothing in the build pod holds a cluster credential, its egress is limited to DNS and the public internet (no node, API server, VPC, other pods or metadata address), and nothing can connect to it | It can still reach any public address, so a Dockerfile can send what it can read (the registry token mounted for the push) out. The policy is skipped with a local test registry |
 | The registry token leaks | It lives in a per-namespace Secret, mounted only into the build container, not into the build steps | The token is a personal access token with broad scopes (see Design Decisions). Anyone who can read the Secret, or compromise BuildKit, gets it. One registry account holds all images, so that token can overwrite any tenant's image |
 | The operator is compromised | It reads only the metadata of Secrets and ConfigMaps | Its role can read every Secret and ConfigMap in the cluster (Kubernetes cannot grant metadata-only access) and create workloads everywhere |
 | One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik (if the CNI enforces it; k3s does, plain flannel would accept the policies and ignore them), quotas cap usage, the older App keeps a hostname | App egress is limited to DNS, its namespace and the internet (build pods are still open), the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
+| A tenant reaches the node, the API server or the VPC from its pods | App egress is closed to every private range and the metadata address. `allowEgressTo` is capped by an annotation on the namespace, which tenants cannot edit, and refused ranges show in the `EgressAllowed` condition | A ceiling that is too wide (`10.0.0.0/8` covers the node) opens what it covers, so the admin has to set it to the team's real subnets. Public addresses stay open |
 | A tenant claims a domain it does not own | A name must pass the HTTP-01 challenge, so a certificate is issued only if its DNS points at this cluster. Names under the platform domain are refused, and the older App keeps a contested name | Nothing checks who owns a name: the first App to list it holds it. A tenant can sit on a name another team wants, and a name whose DNS already points at the node is served, with a certificate, for whoever claimed it first |
-| Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by tag, not digest. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
+| Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by digest, but Docker Hub is still where it comes from, and bumping it is a manual edit. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
 | The Sealed Secrets key leaks | It is made once outside the repo, kept in a file that is not committed, and lives in the cluster as one Secret in `kube-system`, which no tenant Role can read. k3s encrypts Secrets in its datastore, and on the node the Ansible copy is root-only (mode 0600) and the root volume is encrypted | The key opens every sealed file in Git, so whoever reads that Secret, becomes root on the node, or takes the backup file can decrypt all of them. The datastore encryption does not help against that: k3s keeps its encryption key on the node, and the API returns Secrets decrypted. The key also sits in plain text in a manifest file on the node's disk, and the operator's role can read it. If the key is lost, the sealed files cannot be opened and the secrets must be sealed again |
 | Secrets at rest | k3s encrypts Secrets in its datastore (`secrets-encryption`, set in the Ansible-written k3s config), so they are not in plain text in the database files or in snapshots, and the root volume is encrypted | The encryption key is on the node, so root on the node still reads everything, and the API returns Secrets decrypted to anyone whose role allows it. Files that Ansible copies to the node, such as the sealing key manifest, are plain text on disk. Turning encryption on for an existing cluster needs a rotation, which a fresh install avoids |
 
@@ -765,3 +784,4 @@ The Git build spec starts a registry inside the kind cluster, points the operato
 21. [Day 21](https://lnkd.in/p/dSHdGaCN)
 22. [Day 22](https://lnkd.in/p/dCXkXxiC)
 23. [Day 23](https://lnkd.in/p/dy8-_5b4)
+24. [Day 24](https://lnkd.in/p/dA5VrEWn)

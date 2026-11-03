@@ -301,8 +301,12 @@ func (r *AppReconciler) deployKey(ctx context.Context, namespace, name string) (
 	return &gitrepo.SSHAuth{PrivateKey: key, KnownHosts: hosts}, "", nil
 }
 
-// buildLabel marks the Jobs the operator creates for builds.
-const buildLabel = "platformator.alexanderbakin.com/build"
+// buildLabel marks the Jobs the operator creates for builds, and buildLabelValue
+// is the value it carries.
+const (
+	buildLabel      = "platformator.alexanderbakin.com/build"
+	buildLabelValue = "true"
+)
 
 // buildOfLabel names the App a build belongs to. It must not be the "app" label:
 // the Deployment, Service, NetworkPolicy and HPA of an App select pods by
@@ -313,7 +317,7 @@ const buildOfLabel = "platformator.alexanderbakin.com/build-of"
 // runningBuilds counts the build Jobs, in every namespace, that have not ended.
 func (r *AppReconciler) runningBuilds(ctx context.Context) (int, error) {
 	var jobs batchv1.JobList
-	if err := r.List(ctx, &jobs, client.MatchingLabels{buildLabel: "true"}); err != nil {
+	if err := r.List(ctx, &jobs, client.MatchingLabels{buildLabel: buildLabelValue}); err != nil {
 		return 0, err
 	}
 	running := 0
@@ -456,7 +460,7 @@ func (r *AppReconciler) buildJob(app *platformatorv1alpha1.App, commit, image, n
 	if dockerfile == "" {
 		dockerfile = "Dockerfile"
 	}
-	labels := map[string]string{buildOfLabel: app.Name, buildLabel: "true"}
+	labels := map[string]string{buildOfLabel: app.Name, buildLabel: buildLabelValue}
 	zero := int32(0)
 	ttl := buildJobTTL
 	uid := int64(1000)

@@ -79,7 +79,8 @@ func main() {
 			"env var. Layer caching is off in this mode. Do not use it for a registry on a network.")
 	flag.StringVar(&registrySecret, "registry-secret", "registry-credentials",
 		"Name of the dockerconfigjson Secret, in each App's namespace, used to push and pull built images.")
-	flag.StringVar(&builderImage, "buildkit-image", "moby/buildkit:v0.23.2-rootless",
+	flag.StringVar(&builderImage, "buildkit-image",
+		"moby/buildkit:v0.23.2-rootless@sha256:cab936745de5d673465948f1e93ff4d6e372bbe33f218afd3314eba45a6f85a9",
 		"Rootless BuildKit image that runs the build Jobs.")
 	var githubWebhookAddr string
 	flag.StringVar(&githubWebhookAddr, "github-webhook-bind-address", os.Getenv("GITHUB_WEBHOOK_ADDR"),

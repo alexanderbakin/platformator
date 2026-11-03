@@ -8,3 +8,10 @@ metadata:
     # the baseline profile forbids. See the threat model in the README.
     pod-security.kubernetes.io/warn: baseline
     pod-security.kubernetes.io/audit: baseline
+  annotations:
+    # The private ranges the Apps of this team may ask for in
+    # spec.network.allowEgressTo, for example the subnet of their database.
+    # Only the platform admin can edit a Namespace, so this is the ceiling: a
+    # range outside it is ignored and reported in the App's EgressAllowed
+    # condition. Without the annotation, nothing private is reachable.
+    # platformator.alexanderbakin.com/egress-allowed: "10.0.2.0/24"

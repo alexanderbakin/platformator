@@ -111,6 +111,7 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -156,6 +157,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	// stays nil for an App without custom domains.
 	var domains domainPlan
 	var domainsCond *metav1.Condition
+	// egressCond is EgressAllowed: set only for an App that lists
+	// spec.network.allowEgressTo.
+	var egressCond *metav1.Condition
 
 	// This runs right before Reconcile actually returns, whichever of the
 	// return statements below fires. It records two status conditions and
@@ -198,6 +202,11 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		case len(app.Spec.Domains) == 0:
 			meta.RemoveStatusCondition(&app.Status.Conditions, conditionDomainsReady)
 		}
+		if egressCond != nil {
+			meta.SetStatusCondition(&app.Status.Conditions, *egressCond)
+		} else if app.Spec.Network == nil || len(app.Spec.Network.AllowEgressTo) == 0 {
+			meta.RemoveStatusCondition(&app.Status.Conditions, conditionEgressAllowed)
+		}
 		if err == nil {
 			// Certificate changes are not watched (the CRD may not even be
 			// installed), so look again later: soon while it is not issued, and
@@ -223,6 +232,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			r.emitTransitionEvents(&app, previous, reconciled, ready, certCond)
 			r.emitBuildEvent(&app, previous, builtCond)
 			r.emitDomainsEvent(&app, previous, domainsCond)
+			r.emitEgressEvent(&app, previous, egressCond)
 			recordBuild(previous, builtCond, build.took)
 		}
 	}()
@@ -236,6 +246,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		return ctrl.Result{}, nil
 	}
 
+	if err = r.reconcileBuildNetworkPolicy(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling build network policy: %w", err)
+	}
 	if build, err = r.reconcileBuild(ctx, &app); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling build: %w", err)
 	}
@@ -256,7 +269,12 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	if err = r.reconcileIngress(ctx, &app, domains.serve); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling ingress: %w", err)
 	}
-	if err = r.reconcileNetworkPolicy(ctx, &app); err != nil {
+	var egress egressPlan
+	if egress, err = r.planEgress(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("planning egress: %w", err)
+	}
+	egressCond = egressCondition(&app, egress)
+	if err = r.reconcileNetworkPolicy(ctx, &app, egress.allowed); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling network policy: %w", err)
 	}
 	app.Status.URL = "https://" + r.hostFor(&app)
