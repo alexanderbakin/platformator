@@ -89,6 +89,19 @@ type AppReconciler struct {
 	// connect to an App. It defaults to kube-system, where k3s runs Traefik.
 	IngressNamespace string
 
+	// PostgresImage runs the databases of Apps with spec.postgres, and takes
+	// and loads their dumps. BackupToolsImage uploads and downloads the dumps.
+	// Both fall back to defaults when empty.
+	PostgresImage    string
+	BackupToolsImage string
+
+	// BackupBucket, BackupRoleARN and BackupRegion say where dumps go and which
+	// cloud role the backup pods assume with their projected ServiceAccount
+	// token. Without a bucket and a role, backups and restores are refused.
+	BackupBucket  string
+	BackupRoleARN string
+	BackupRegion  string
+
 	// Recorder publishes Kubernetes Events about each App, visible in
 	// `kubectl describe app`. It may be nil (tests), then no events are sent.
 	Recorder events.EventRecorder
@@ -105,12 +118,15 @@ type AppReconciler struct {
 // +kubebuilder:rbac:groups=platformator.alexanderbakin.com,resources=apps/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create
-// +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets;configmaps,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -161,6 +177,9 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	// spec.network.allowEgressTo.
 	var egressCond *metav1.Condition
 
+	// pg holds PostgresReady and BackupsReady, for an App with spec.postgres.
+	var pg postgresOutcome
+
 	// This runs right before Reconcile actually returns, whichever of the
 	// return statements below fires. It records two status conditions and
 	// persists them via the status subresource:
@@ -207,6 +226,7 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 		} else if app.Spec.Network == nil || len(app.Spec.Network.AllowEgressTo) == 0 {
 			meta.RemoveStatusCondition(&app.Status.Conditions, conditionEgressAllowed)
 		}
+		applyPostgresConditions(&app, pg)
 		if err == nil {
 			// Certificate changes are not watched (the CRD may not even be
 			// installed), so look again later: soon while it is not issued, and
@@ -233,6 +253,8 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 			r.emitBuildEvent(&app, previous, builtCond)
 			r.emitDomainsEvent(&app, previous, domainsCond)
 			r.emitEgressEvent(&app, previous, egressCond)
+			r.emitPostgresEvent(&app, previous, pg.ready)
+			r.emitPostgresEvent(&app, previous, pg.backups)
 			recordBuild(previous, builtCond, build.took)
 		}
 	}()
@@ -254,6 +276,10 @@ func (r *AppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result
 	}
 
 	app.Status.Image = build.image
+
+	if pg, err = r.reconcilePostgres(ctx, &app); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling postgres: %w", err)
+	}
 
 	if dep, err = r.reconcileDeployment(ctx, &app, build.image); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling deployment: %w", err)
@@ -448,7 +474,7 @@ func (r *AppReconciler) reconcileDeployment(
 					Image:     image,
 					Ports:     []corev1.ContainerPort{{ContainerPort: app.Spec.Port}},
 					Resources: app.Spec.Resources,
-					Env:       app.Spec.Env,
+					Env:       append(postgresEnv(app), app.Spec.Env...),
 					EnvFrom:   app.Spec.EnvFrom,
 
 					SecurityContext: containerSecurity,
@@ -488,7 +514,7 @@ func securityFor(app *platformatorv1alpha1.App) (*corev1.PodSecurityContext, *co
 	}
 	if opts.DropCapabilities {
 		container.Capabilities = &corev1.Capabilities{
-			Drop: []corev1.Capability{"ALL"},
+			Drop: []corev1.Capability{dropAll},
 			Add:  []corev1.Capability{"NET_BIND_SERVICE"},
 		}
 	}
@@ -927,6 +953,8 @@ func (r *AppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&batchv1.Job{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&appsv1.StatefulSet{}).
+		Owns(&batchv1.CronJob{}).
 		// Secrets and ConfigMaps are watched by metadata only, so the operator
 		// never holds their data in memory.
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.appsUsing(kindSecret)), builder.OnlyMetadata).

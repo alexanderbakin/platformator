@@ -6,6 +6,8 @@ release and `<latest tag>-build.<N>` on every other push to `main`.
 ## Unreleased
 
 ### Added
+- `spec.postgres`: a PostgreSQL database per App, run by the operator (StatefulSet, volume, headless Service, generated credentials, a NetworkPolicy for the App's pods only), exposed as `DATABASE_URL` and reported in a `PostgresReady` condition. It cannot be removed from a running App. New flags: `--postgres-image`.
+- Database backups to S3 (`spec.postgres.backup`, a CronJob running `pg_dump`) and restores (`spec.postgres.restoreFrom`, one Job per value, `status.postgres.restoredFrom`), with a `BackupsReady` condition. Backup pods assume an IAM role with a projected ServiceAccount token, no stored keys. New flags: `--backup-bucket`, `--backup-role-arn`, `--backup-region`, `--backup-tools-image`. The operator needs more RBAC (StatefulSets, CronJobs, ServiceAccounts, create on Secrets).
 - GitHub push webhooks (`--github-webhook-bind-address`, `GITHUB_WEBHOOK_SECRET`, `make deploy-webhook`): a push starts the matching Apps' builds at once, and polling stays as the fallback.
 - A `Terraform` workflow: `terraform fmt -check`, Checkov, TFLint and `terraform validate`, from pinned versions.
 - Custom domains: `spec.domains` serves an App on names of its own, each with its own certificate, reported in a `DomainsReady` condition and a `DOMAINS` column. Names under the platform domain are refused, and the older App keeps a contested name.

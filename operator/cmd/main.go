@@ -82,6 +82,19 @@ func main() {
 	flag.StringVar(&builderImage, "buildkit-image",
 		"moby/buildkit:v0.23.2-rootless@sha256:cab936745de5d673465948f1e93ff4d6e372bbe33f218afd3314eba45a6f85a9",
 		"Rootless BuildKit image that runs the build Jobs.")
+	var postgresImage, backupToolsImage, backupBucket, backupRoleARN, backupRegion string
+	flag.StringVar(&postgresImage, "postgres-image", controller.DefaultPostgresImage,
+		"Image of the databases of Apps with spec.postgres. It is also the client that dumps and restores them, "+
+			"so keep the major version the same for both.")
+	flag.StringVar(&backupToolsImage, "backup-tools-image", controller.DefaultBackupToolsImage,
+		"Image with the AWS CLI, which uploads and downloads database dumps.")
+	flag.StringVar(&backupBucket, "backup-bucket", os.Getenv("BACKUP_BUCKET"),
+		"S3 bucket for database dumps. Falls back to the BACKUP_BUCKET env var. Without a bucket and a role, "+
+			"spec.postgres.backup and restoreFrom are refused.")
+	flag.StringVar(&backupRoleARN, "backup-role-arn", os.Getenv("BACKUP_ROLE_ARN"),
+		"IAM role that backup pods assume with their projected ServiceAccount token. Falls back to BACKUP_ROLE_ARN.")
+	flag.StringVar(&backupRegion, "backup-region", os.Getenv("BACKUP_REGION"),
+		"AWS region of the backup bucket. Falls back to the BACKUP_REGION env var.")
 	var githubWebhookAddr string
 	flag.StringVar(&githubWebhookAddr, "github-webhook-bind-address", os.Getenv("GITHUB_WEBHOOK_ADDR"),
 		"Address that receives GitHub push webhooks, e.g. :8082. Empty turns webhooks off; branches are polled "+
@@ -236,6 +249,11 @@ func main() {
 		BuildTimeout:     buildTimeout,
 		MaxBuilds:        maxBuilds,
 		IngressNamespace: ingressNamespace,
+		PostgresImage:    postgresImage,
+		BackupToolsImage: backupToolsImage,
+		BackupBucket:     backupBucket,
+		BackupRoleARN:    backupRoleARN,
+		BackupRegion:     backupRegion,
 		Triggers:         triggers,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "app")

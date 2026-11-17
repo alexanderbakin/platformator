@@ -4,7 +4,7 @@ A tiny PaaS built as a 30-day challenge. A Kubernetes Operator (CRDs + Controlle
 
 ## Status
 
-Day 25 of 30.
+Day 26 of 30.
 
 Single-node k3s cluster on AWS, reachable over a real domain, serving trusted Let's Encrypt certificates via cert-manager. Apps are deployed through an `App` CRD and a controller (Kubebuilder, Go) that creates and keeps in sync a Deployment, Service, Ingress and HorizontalPodAutoscaler for each App.
 
@@ -125,6 +125,10 @@ Each entry says what was chosen, why, and what it costs.
 **Secrets are committed sealed, with a key that lives outside the cluster.** Sealed Secrets encrypts a Secret to a public certificate, so the encrypted file can sit in Git next to the App manifests, and a controller in the cluster turns it back into an ordinary Secret. The operator needs no change, because Apps already read ordinary Secrets through `envFrom`. The catch with a node that is destroyed often is the private key: the controller makes its own on first start, and files sealed for the last cluster would not open on the next one. So I generate the key pair once with a script, keep the private half in a file outside the repo, and Ansible installs it before the controller starts, with key renewal turned off so there is exactly one key. Cost: that file is the one thing to back up, losing it means sealing every secret again, and whoever holds it can open every sealed file.
 
 **External Secrets and the Secrets Store CSI driver were considered and left out.** The External Secrets Operator would keep the values in AWS, which survives the cluster with no key to back up, but a pod has to authenticate to AWS to read them. The node accepts only IMDSv2 and leaves the hop limit at its default of 1, so pods cannot reach the instance's credentials, which is the point of that setting. Allowing it would give every pod on the node a route to the node's role, and a static IAM key would need a Secret created by hand, the problem being solved. The CSI driver mounts values as files and mirrors them into a Secret only while a pod mounts them, which does not fit `envFrom`, build Jobs or the operator's own Secrets without changing what the operator creates. Cost: no central store to rotate from. On a cluster with a per-pod AWS identity (EKS, for example) External Secrets would be the better answer.
+
+**Postgres is run by the operator on the node, and backups are the only copy that survives.** One StatefulSet per App, on the node's disk, with no replica and no failover. It is the smallest thing that gives an App a real database and keeps the project a single binary, and the dump to S3 is what protects the data. Cost: a node loss between two backups loses that window, a restore is manual (set `restoreFrom`), and a managed database would be the better answer for anything that matters.
+
+**Backups authenticate with a projected ServiceAccount token, not keys and not the node's role.** The pod gets a short-lived token that AWS accepts through an OIDC provider backed by the cluster's own signing keys (what EKS does for IRSA, done by hand on k3s). The alternatives were an access key in a Secret, which is a long-lived credential to rotate, and the instance profile, which every pod on the node could use. Cost: the cluster has to publish its discovery document and public keys somewhere AWS can read, and those change with each new cluster.
 
 **GitOps (Flux or Argo CD) is left out.** The operator already reconciles every App into its Deployment, Service, Ingress and certificates, and the platform runs on one node that is rebuilt from scratch with Ansible and `make deploy-image`. A second reconciliation loop over the platform itself would add a control plane to run, with its own bootstrap and ordering (CRD before operator, the domain substituted into manifests), and would close none of the multi-tenant gaps that matter more here. Cost: nothing compares the cluster to Git after the install, so a hand edit to the operator Deployment or an Issuer stays until the next deploy, and an upgrade is a manual `make deploy-image`. It would start to pay off on a long-lived or shared cluster.
 
@@ -591,6 +595,27 @@ Within the ceiling, list the narrowest ranges that work. The node and the Kubern
 
 The policy needs a CNI that enforces NetworkPolicy. k3s does (it ships kube-router for this).
 
+### Postgres and backups
+
+`spec.postgres` gives an App a PostgreSQL database that the operator runs in its namespace:
+
+```yaml
+spec:
+  postgres:
+    size: 5Gi              # default 1Gi
+    backup:
+      schedule: "0 3 * * *"  # UTC, the default
+    # restoreFrom: 20261117T030000Z.dump
+```
+
+The operator creates a StatefulSet with one volume, a headless Service `<app>-postgres`, a Secret with a generated password and the `DATABASE_URL` the App reads (put first in the App's environment, so an entry of the same name in `env` overrides it), and a NetworkPolicy that lets only the App's pods and its backup pods connect. The database starts no connections itself. The `PostgresReady` condition says whether it accepts connections.
+
+The database belongs to the App: deleting the App deletes the volume and the Secret, so backups are what survives. Removing `spec.postgres` from a running App is refused for the same reason. The major version is fixed by `--postgres-image` (default `postgres:17-alpine`); upgrading a major version means a dump and a restore.
+
+**Backups.** With `backup` set, a CronJob runs `pg_dump` and uploads the dump to `s3://<bucket>/<namespace>/<app>/<timestamp>.dump`. It needs the operator to start with `--backup-bucket`, `--backup-role-arn` and `--backup-region` (or `BACKUP_BUCKET`, `BACKUP_ROLE_ARN`, `BACKUP_REGION`); without them `BackupsReady` is False with the reason `BackupNotConfigured`. There are no stored keys. The backup pod has a ServiceAccount `platformator-backup` and a projected token for the audience `sts.amazonaws.com`, and the AWS CLI trades it for the role. The role's trust policy must accept only `system:serviceaccount:*:platformator-backup` from the cluster's OIDC issuer. Retention is a lifecycle rule on the bucket, not the operator's job.
+
+**Restore.** `restoreFrom` is the file name of a dump in the App's own folder of the bucket. Once the database is ready, a Job downloads it and runs `pg_restore --clean --if-exists` over what is there, then `status.postgres.restoredFrom` records it, so each value restores once. While it runs `PostgresReady` is False with the reason `Restoring`; if it fails the reason is `RestoreFailed` and deleting the Job retries. The value cannot contain a slash, so an App cannot name another tenant's dump. To bring an App back after losing the cluster, create it again with the same name and namespace and `restoreFrom` set to the newest dump.
+
 ### Teams and quotas
 
 Give each team its own namespace. `examples/tenant` is a ready kustomization for one:
@@ -619,6 +644,7 @@ This is soft multi-tenancy for teams that trust each other, not isolation for ho
 | The registry token leaks | It lives in a per-namespace Secret, mounted only into the build container, not into the build steps | The token is a personal access token with broad scopes (see Design Decisions). Anyone who can read the Secret, or compromise BuildKit, gets it. One registry account holds all images, so that token can overwrite any tenant's image |
 | The operator is compromised | It reads only the metadata of Secrets and ConfigMaps | Its role can read every Secret and ConfigMap in the cluster (Kubernetes cannot grant metadata-only access) and create workloads everywhere |
 | One tenant reaches another's App | RBAC and Secrets are per namespace, NetworkPolicy allows ingress only from Traefik (if the CNI enforces it; k3s does, plain flannel would accept the policies and ignore them), quotas cap usage, the older App keeps a hostname | App egress is limited to DNS, its namespace and the internet (build pods are still open), the kernel is shared, and Pod Security is only warned and audited, because baseline would forbid the build pods' unconfined profiles |
+| A tenant reads another tenant's database or backups | The database accepts connections only from its own App's pods and backup pods, each with its own generated password. A dump lands in a folder named after the namespace and the App, and `restoreFrom` cannot name a path | The backup role covers the whole bucket, and every namespace's `platformator-backup` ServiceAccount can assume it, so anyone who can create a pod there can read every tenant's dumps. Tenants cannot create pods here (they only create Apps), which is what keeps this closed. The connection is not encrypted, and dumps are only as private as the bucket's encryption |
 | A tenant reaches the node, the API server or the VPC from its pods | App egress is closed to every private range and the metadata address. `allowEgressTo` is capped by an annotation on the namespace, which tenants cannot edit, and refused ranges show in the `EgressAllowed` condition | A ceiling that is too wide (`10.0.0.0/8` covers the node) opens what it covers, so the admin has to set it to the team's real subnets. Public addresses stay open |
 | A tenant claims a domain it does not own | A name must pass the HTTP-01 challenge, so a certificate is issued only if its DNS points at this cluster. Names under the platform domain are refused, and the older App keeps a contested name | Nothing checks who owns a name: the first App to list it holds it. A tenant can sit on a name another team wants, and a name whose DNS already points at the node is served, with a certificate, for whoever claimed it first |
 | Code or images are tampered with | Builds use the resolved commit, not the branch name | The BuildKit image is pinned by digest, but Docker Hub is still where it comes from, and bumping it is a manual edit. Base images in a Dockerfile are not verified, and App images are neither scanned nor signed |
@@ -785,3 +811,4 @@ The Git build spec starts a registry inside the kind cluster, points the operato
 22. [Day 22](https://lnkd.in/p/dCXkXxiC)
 23. [Day 23](https://lnkd.in/p/dy8-_5b4)
 24. [Day 24](https://lnkd.in/p/dA5VrEWn)
+25. [Day 25](https://lnkd.in/p/dyN_sp_U)

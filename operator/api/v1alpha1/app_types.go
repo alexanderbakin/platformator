@@ -18,12 +18,14 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // +kubebuilder:validation:XValidation:rule="has(self.image) != has(self.source)",message="set exactly one of image and source"
 // +kubebuilder:validation:XValidation:rule="!has(self.minReplicas) || !has(self.maxReplicas) || self.maxReplicas >= self.minReplicas",message="maxReplicas must be greater than or equal to minReplicas"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.postgres) || has(self.postgres)",message="postgres cannot be removed from a running App, because that would orphan the database; delete the App instead"
 type AppSpec struct {
 	// image is a ready-made container image to run, for example "nginx:1.27".
 	// Set either image or source.
@@ -110,6 +112,57 @@ type AppSpec struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	// +kubebuilder:validation:items:Pattern=`^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\.)+[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`
 	Domains []string `json:"domains,omitempty"`
+
+	// postgres adds a PostgreSQL database to the App. The operator runs it in
+	// the App's namespace, puts its address and a generated password in the
+	// DATABASE_URL environment variable of the App, and lets only the App's
+	// pods connect to it. The database and its volume belong to the App:
+	// deleting the App deletes them, so keep backups on.
+	// +optional
+	Postgres *Postgres `json:"postgres,omitempty"`
+}
+
+// Postgres configures the database of an App.
+type Postgres struct {
+	// size is the size of the database volume. It cannot shrink, and growing
+	// it needs a storage class that supports expansion.
+	// +optional
+	// +kubebuilder:default="1Gi"
+	Size resource.Quantity `json:"size,omitempty"`
+
+	// backup dumps the database to the platform's backup bucket on a schedule.
+	// It needs the operator to be started with a backup bucket and role;
+	// without them the BackupsReady condition says so.
+	// +optional
+	Backup *PostgresBackup `json:"backup,omitempty"`
+
+	// restoreFrom loads a backup into the database: the file name of a dump
+	// in the App's own folder of the backup bucket, for example
+	// "20261117T030000Z.dump". It is restored once for each value, after the
+	// database is ready, over whatever is in the database (objects in the dump
+	// are dropped and recreated). The App keeps running meanwhile. To restore
+	// again, set another value; to retry a failed restore, delete its Job.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*\.dump$`
+	RestoreFrom string `json:"restoreFrom,omitempty"`
+}
+
+// PostgresBackup configures the backups of a database.
+type PostgresBackup struct {
+	// schedule is a cron expression, in UTC, for how often to take a backup.
+	// +optional
+	// +kubebuilder:default="0 3 * * *"
+	// +kubebuilder:validation:MaxLength=100
+	Schedule string `json:"schedule,omitempty"`
+}
+
+// PostgresStatus is the state of the database of an App that has spec.postgres.
+type PostgresStatus struct {
+	// restoredFrom is the last spec.postgres.restoreFrom that was restored
+	// successfully.
+	// +optional
+	RestoredFrom string `json:"restoredFrom,omitempty"`
 }
 
 // Network holds the options of the App's NetworkPolicy.
@@ -259,6 +312,10 @@ type AppStatus struct {
 	// build is the state of the builds, for an App that has spec.source.
 	// +optional
 	Build *BuildStatus `json:"build,omitempty"`
+
+	// postgres is the state of the database, for an App that has spec.postgres.
+	// +optional
+	Postgres *PostgresStatus `json:"postgres,omitempty"`
 
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file

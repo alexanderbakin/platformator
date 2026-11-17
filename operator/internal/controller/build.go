@@ -596,7 +596,7 @@ rm -rf .git
 			RunAsUser:                &uid,
 			RunAsGroup:               &uid,
 			AllowPrivilegeEscalation: &allow,
-			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{dropAll}},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: workspaceName, MountPath: workspaceDir},
