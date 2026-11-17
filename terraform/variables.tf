@@ -48,3 +48,15 @@ variable "domain" {
   type        = string
   description = "Base domain the platform is served on (e.g. paas.alexanderbakin.com)"
 }
+
+variable "backup_retention_days" {
+  type        = number
+  description = "Days a database dump is kept in the backup bucket before it expires"
+  default     = 30
+}
+
+variable "backup_force_destroy" {
+  type        = bool
+  description = "Let terraform destroy delete a backup bucket that still holds dumps. Off by default: the dumps are what survives a destroyed cluster."
+  default     = false
+}

@@ -6,3 +6,12 @@ tls-san:
 # database files or snapshots. Set on a fresh install: turning it on later
 # needs a rotation.
 secrets-encryption: true
+{% if service_account_issuer | length > 0 %}
+# Tokens that pods can trade for a cloud role (database backups). The first
+# issuer signs; the default one stays listed so existing tokens keep working.
+# The public keys are published by the playbook to the bucket behind the URL.
+kube-apiserver-arg:
+  - "service-account-issuer={{ service_account_issuer }}"
+  - "service-account-issuer=https://kubernetes.default.svc.cluster.local"
+  - "service-account-jwks-uri={{ service_account_issuer }}/keys.json"
+{% endif %}

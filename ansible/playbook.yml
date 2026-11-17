@@ -11,6 +11,19 @@
     # Path to key.yaml from sealed-secrets/generate-key.sh. Empty: the controller
     # makes its own key, and files sealed for another cluster will not open.
     sealed_secrets_key_file: ""
+    # From `terraform output` (see the README, "Postgres and backups"). Empty:
+    # no workload identity, and database backups cannot reach S3.
+    service_account_issuer: "{{ lookup('env', 'SERVICE_ACCOUNT_ISSUER') }}"
+    oidc_bucket: "{{ lookup('env', 'OIDC_BUCKET') }}"
+    oidc_region: "{{ lookup('env', 'AWS_DEFAULT_REGION') }}"
+  pre_tasks:
+    - name: Check that the keys have a bucket to go to
+      ansible.builtin.assert:
+        that:
+          - oidc_bucket | length > 0
+          - oidc_region | length > 0
+        fail_msg: SERVICE_ACCOUNT_ISSUER is set, so OIDC_BUCKET and AWS_DEFAULT_REGION must be set too
+      when: service_account_issuer | length > 0
   tasks:
     - name: Ensure k3s config directory exists
       ansible.builtin.file:
@@ -80,6 +93,42 @@
         name: k3s
         state: started
         enabled: true
+
+    # Run the restart now, not at the end, so the issuer is in effect before
+    # the keys are read.
+    - name: Apply a changed k3s config
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read the public keys that sign ServiceAccount tokens
+      ansible.builtin.command: k3s kubectl get --raw /openid/v1/jwks
+      register: service_account_keys
+      until: service_account_keys.rc == 0
+      retries: 30
+      delay: 5
+      changed_when: false
+      when: service_account_issuer | length > 0
+
+    # The keys are public and AWS reads them over HTTPS to check a token. They
+    # change with every new cluster, so this runs on every play. It runs from
+    # your machine, with your AWS credentials: the node has none.
+    - name: Publish the public keys
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3
+          - cp
+          - "-"
+          - "s3://{{ oidc_bucket }}/keys.json"
+          - --content-type
+          - application/json
+          - --region
+          - "{{ oidc_region }}"
+      args:
+        stdin: "{{ service_account_keys.stdout }}"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      when: service_account_issuer | length > 0
 
     - name: Fetch kubeconfig
       ansible.builtin.fetch:

@@ -225,7 +225,7 @@ domain           = "<the domain you entered above>"
 terraform apply
 ```
 
-This provisions the VPC, the EC2 instance, its Elastic IP, and the `$DOMAIN` + wildcard DNS records pointing at that IP.
+This provisions the VPC, the EC2 instance, its Elastic IP, and the `$DOMAIN` + wildcard DNS records pointing at that IP. It also creates the two buckets and the IAM role behind [database backups](#postgres-and-backups).
 
 ### Configure the node with Ansible
 
@@ -238,9 +238,11 @@ pip install -r requirements.txt
 ansible-galaxy collection install -r requirements.yml
 ```
 
-Run the playbook:
+Run the playbook. To let pods back up databases to S3, give it the outputs of Terraform first (leave them out and the cluster has no workload identity):
 
 ```bash
+export SERVICE_ACCOUNT_ISSUER=$(terraform -chdir=../terraform output -raw service_account_issuer)
+export OIDC_BUCKET=$(terraform -chdir=../terraform output -raw oidc_bucket)
 ansible-playbook playbook.yml
 ```
 
@@ -613,6 +615,16 @@ The operator creates a StatefulSet with one volume, a headless Service `<app>-po
 The database belongs to the App: deleting the App deletes the volume and the Secret, so backups are what survives. Removing `spec.postgres` from a running App is refused for the same reason. The major version is fixed by `--postgres-image` (default `postgres:17-alpine`); upgrading a major version means a dump and a restore.
 
 **Backups.** With `backup` set, a CronJob runs `pg_dump` and uploads the dump to `s3://<bucket>/<namespace>/<app>/<timestamp>.dump`. It needs the operator to start with `--backup-bucket`, `--backup-role-arn` and `--backup-region` (or `BACKUP_BUCKET`, `BACKUP_ROLE_ARN`, `BACKUP_REGION`); without them `BackupsReady` is False with the reason `BackupNotConfigured`. There are no stored keys. The backup pod has a ServiceAccount `platformator-backup` and a projected token for the audience `sts.amazonaws.com`, and the AWS CLI trades it for the role. The role's trust policy must accept only `system:serviceaccount:*:platformator-backup` from the cluster's OIDC issuer. Retention is a lifecycle rule on the bucket, not the operator's job.
+
+**Setting it up (AWS).** Terraform creates the backup bucket (private, versioned, encrypted, dumps expire after `backup_retention_days`, 30 by default), a public bucket for the cluster's discovery files, an IAM OIDC provider for it and the role `platformator-backup`, which may only put and get objects in the backup bucket. The playbook (with `SERVICE_ACCOUNT_ISSUER` and `OIDC_BUCKET`, see above) makes k3s sign ServiceAccount tokens with that bucket's address as issuer, then publishes the cluster's public keys to `keys.json` in it, from your machine with your AWS credentials. Then tell the operator, in `operator/config/default/operator.env` (see `operator.env.example`), and deploy it again:
+
+```bash
+BACKUP_BUCKET=$(terraform -chdir=terraform output -raw backup_bucket)
+BACKUP_ROLE_ARN=$(terraform -chdir=terraform output -raw backup_role_arn)
+BACKUP_REGION=<the region>
+```
+
+The keys change with every new cluster, so a rebuilt cluster publishes its own when the playbook runs, and tokens from the old one stop working. The discovery bucket is public on purpose, for those two files only (the bucket policy names them), because AWS has to read them to trust a token. `terraform destroy` stops at the backup bucket while it holds dumps; set `backup_force_destroy = true` to remove them too.
 
 **Restore.** `restoreFrom` is the file name of a dump in the App's own folder of the bucket. Once the database is ready, a Job downloads it and runs `pg_restore --clean --if-exists` over what is there, then `status.postgres.restoredFrom` records it, so each value restores once. While it runs `PostgresReady` is False with the reason `Restoring`; if it fails the reason is `RestoreFailed` and deleting the Job retries. The value cannot contain a slash, so an App cannot name another tenant's dump. To bring an App back after losing the cluster, create it again with the same name and namespace and `restoreFrom` set to the newest dump.
 

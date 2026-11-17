@@ -12,6 +12,24 @@
           name: operator-config
           key: REGISTRY
           optional: true
+    - name: BACKUP_BUCKET
+      valueFrom:
+        configMapKeyRef:
+          name: operator-config
+          key: BACKUP_BUCKET
+          optional: true
+    - name: BACKUP_ROLE_ARN
+      valueFrom:
+        configMapKeyRef:
+          name: operator-config
+          key: BACKUP_ROLE_ARN
+          optional: true
+    - name: BACKUP_REGION
+      valueFrom:
+        configMapKeyRef:
+          name: operator-config
+          key: BACKUP_REGION
+          optional: true
     - name: GITHUB_WEBHOOK_ADDR
       valueFrom:
         configMapKeyRef:

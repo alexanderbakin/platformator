@@ -13,6 +13,7 @@ release and `<latest tag>-build.<N>` on every other push to `main`.
 - Custom domains: `spec.domains` serves an App on names of its own, each with its own certificate, reported in a `DomainsReady` condition and a `DOMAINS` column. Names under the platform domain are refused, and the older App keeps a contested name.
 - Sealed Secrets on the node, with a private key made once by `sealed-secrets/generate-key.sh` and installed by Ansible (`sealed_secrets_key_file`), so files sealed for one cluster open on the next.
 - Private repositories over SSH: `spec.source.git.deployKeySecret` with an SSH address, host keys pinned from the Secret's `known_hosts`, and a clone in an init container so the key never reaches the build container.
+- Terraform for database backups: a private backup bucket (versioned, encrypted, lifecycle expiry), a public bucket for the cluster's OIDC discovery files, an IAM OIDC provider and the role `platformator-backup`, trusted only for the `platformator-backup` ServiceAccount. The playbook makes k3s issue tokens for that issuer and publishes the cluster's public keys (`SERVICE_ACCOUNT_ISSUER`, `OIDC_BUCKET`). The operator reads `BACKUP_BUCKET`, `BACKUP_ROLE_ARN` and `BACKUP_REGION` from `operator.env`.
 
 ### Changed
 - Build pods get a NetworkPolicy of their own (`platformator-builds`, one per namespace): DNS and the public internet only, with the private ranges and the metadata address closed and no ingress. It is skipped with a local test registry (`REGISTRY_INSECURE`).
