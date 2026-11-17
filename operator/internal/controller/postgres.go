@@ -395,6 +395,21 @@ func (r *AppReconciler) reconcileBackupServiceAccount(ctx context.Context, app *
 	return err
 }
 
+// shell runs a script with sh.
+func shell() []string { return []string{"/bin/sh", "-c"} }
+
+// afterDatabaseAnswers is the script of a container that talks to the database:
+// it waits until the database accepts connections, then runs command.
+//
+// A new pod is not let through the database's NetworkPolicy until the network
+// plugin has added its address, which takes a couple of seconds, and the first
+// connection of a Job pod would be refused. The wait ends after about a minute
+// and runs command anyway, so a database that is really down fails with its own
+// error.
+func afterDatabaseAnswers(command string) []string {
+	return []string{`i=0; until pg_isready -q || [ "$i" -ge 30 ]; do i=$((i+1)); sleep 2; done; exec ` + command}
+}
+
 // backupPodSpec is the pod of a backup or restore Job: both talk to the
 // database and to the bucket, with the cloud role and no stored keys.
 func (r *AppReconciler) backupPodSpec(init, main corev1.Container) corev1.PodSpec {
@@ -482,11 +497,11 @@ func (r *AppReconciler) reconcileBackups(
 	// next container, which uploads it. Each tool stays in its own image.
 	dump := corev1.Container{
 		Name: "dump", Image: r.postgresImage(), Env: r.pgClientEnv(app),
-		Command: []string{"pg_dump", "--format=custom", "--file=/work/dump"},
+		Command: shell(), Args: afterDatabaseAnswers("pg_dump --format=custom --file=/work/dump"),
 	}
 	upload := corev1.Container{
 		Name: "upload", Image: r.backupToolsImage(), Env: r.cloudEnv(app),
-		Command: []string{"/bin/sh", "-c"},
+		Command: shell(),
 		Args: []string{
 			`aws s3 cp /work/dump "s3://$BUCKET/$PREFIX/$(date -u +%Y%m%dT%H%M%SZ).dump" --only-show-errors`,
 		},
@@ -549,14 +564,14 @@ func (r *AppReconciler) reconcileRestore(
 	if apierrors.IsNotFound(err) {
 		download := corev1.Container{
 			Name: "download", Image: r.backupToolsImage(), Env: r.cloudEnv(app),
-			Command: []string{"/bin/sh", "-c"},
+			Command: shell(),
 			Args:    []string{fmt.Sprintf(`aws s3 cp "s3://$BUCKET/$PREFIX/%s" /work/dump --only-show-errors`, file)},
 		}
 		restore := corev1.Container{
 			Name: "restore", Image: r.postgresImage(), Env: r.pgClientEnv(app),
-			Command: []string{
-				"pg_restore", "--clean", "--if-exists", "--no-owner", "--dbname=" + postgresDatabase, "/work/dump",
-			},
+			Command: shell(),
+			Args: afterDatabaseAnswers(
+				"pg_restore --clean --if-exists --no-owner --dbname=" + postgresDatabase + " /work/dump"),
 		}
 		job = batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: app.Namespace}}
 		backoff := int32(2)

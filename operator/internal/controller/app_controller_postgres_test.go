@@ -179,7 +179,8 @@ var _ = Describe("App postgres", func() {
 			Expect(pod.Spec.ServiceAccountName).To(Equal(backupServiceAccount))
 			Expect(*pod.Spec.SecurityContext.RunAsNonRoot).To(BeTrue())
 			Expect(pod.Spec.InitContainers).To(HaveLen(1))
-			Expect(pod.Spec.InitContainers[0].Command[0]).To(Equal("pg_dump"))
+			Expect(pod.Spec.InitContainers[0].Args[0]).To(ContainSubstring("pg_isready"))
+			Expect(pod.Spec.InitContainers[0].Args[0]).To(ContainSubstring("exec pg_dump --format=custom"))
 
 			env := map[string]string{}
 			for _, e := range pod.Spec.Containers[0].Env {
@@ -221,7 +222,7 @@ var _ = Describe("App postgres", func() {
 			job := &batchv1.Job{}
 			Expect(k8sClient.Get(ctx, key(app, "-postgres-restore-"+restoreSuffix(app)), job)).To(Succeed())
 			Expect(job.Spec.Template.Spec.InitContainers[0].Args[0]).To(ContainSubstring("$PREFIX/" + testDump))
-			Expect(job.Spec.Template.Spec.Containers[0].Command[0]).To(Equal("pg_restore"))
+			Expect(job.Spec.Template.Spec.Containers[0].Args[0]).To(ContainSubstring("exec pg_restore --clean"))
 
 			cond := condition(app, conditionPostgresReady)
 			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
