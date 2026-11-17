@@ -20,6 +20,7 @@ resource "aws_s3_bucket" "oidc" {
   #checkov:skip=CKV_AWS_21:The keys are replaced by every new cluster, old versions are of no use
   #checkov:skip=CKV_AWS_144:Cross-region replication of a file the playbook can publish again is not needed
   #checkov:skip=CKV_AWS_145:The files are public, so encrypting them with a key adds nothing
+  #checkov:skip=CKV2_AWS_6:The public access block lets a bucket policy through, for the two discovery files
   #checkov:skip=CKV2_AWS_61:Two small files, nothing to expire
   #checkov:skip=CKV2_AWS_62:Nothing listens to events of this bucket
   bucket        = "platformator-oidc-${data.aws_caller_identity.current.account_id}"
@@ -32,7 +33,6 @@ resource "aws_s3_bucket" "oidc" {
 resource "aws_s3_bucket_public_access_block" "oidc" {
   #checkov:skip=CKV_AWS_54:The bucket policy has to be public, for the two discovery files
   #checkov:skip=CKV_AWS_56:The bucket policy has to be public, for the two discovery files
-  #checkov:skip=CKV2_AWS_6:The bucket policy has to be public, for the two discovery files
   bucket                  = aws_s3_bucket.oidc.id
   block_public_acls       = true
   ignore_public_acls      = true
