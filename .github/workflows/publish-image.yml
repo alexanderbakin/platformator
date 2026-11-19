@@ -19,7 +19,7 @@ env:
   # The scanner and the signer run from pinned versions, so a release is not
   # affected by a new version of either. Renovate raises the pull requests.
   # renovate: datasource=docker depName=aquasec/trivy
-  TRIVY_VERSION: 0.65.0
+  TRIVY_VERSION: 0.76.2
   # renovate: datasource=go depName=github.com/sigstore/cosign/v2
   COSIGN_VERSION: v2.5.3
 
